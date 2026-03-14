@@ -19,5 +19,11 @@
   "license": "MIT",
   "frameworks": "*",
   "platforms": "*",
-  "headers": "microStore.hpp"
+  "headers": "microStore.hpp",
+  "build": {
+    "includeDir": "include",
+    "srcFilter": [
+      "-<*>"
+    ]
+  }
 }
