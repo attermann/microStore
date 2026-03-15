@@ -171,6 +171,7 @@ public:
     Storage()
     {
         write_buf_pos = 0;
+        active_file.ctx = nullptr;
         index_file.ctx = nullptr;
     }
 
@@ -663,6 +664,11 @@ private:
 
     void open_segment(uint32_t id)
     {
+        if (active_file.ctx) {
+            fs->close(active_file);
+            active_file.ctx = nullptr;
+        }
+
         char name[64];
         segment_name(id,name);
 
@@ -673,26 +679,43 @@ printf("[ufskv] Opening active file: %s\n", name);
         current_offset=fs->tell(active_file);
     }
 
-    void rotate_segment_if_needed(uint32_t write_size)
+    bool rotate_segment_if_needed(uint32_t write_size)
     {
         if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < UFSKV_SEGMENT_SIZE)
-            return;
+            return true;
 
 printf("[ufskv] Rotating segment...\n");
         flush_buffer();
 
-printf("[ufskv] Closing active file\n");
-        fs->close(active_file);
+        if (active_file.ctx) {
+            fs->close(active_file);
+            active_file.ctx = nullptr;
+        }
 
         current_segment++;
 
         if (current_segment >= UFSKV_MAX_SEGMENTS) {
-            compact();  // compact() calls open_segment(0) internally
-            // current_segment and active_file are set by compact → open_segment
-            return;
+            if (compact_in_cooldown &&
+                (ufskv_millis() - compact_cooldown_start_ms) < UFSKV_COMPACT_RETRY_MS)
+            {
+                printf("[ufskv] Compact skipped: cooldown active\n");
+                current_segment = UFSKV_MAX_SEGMENTS - 1;
+                open_segment(current_segment);
+                return false;
+            }
+            if (!compact()) {
+                compact_in_cooldown       = true;
+                compact_cooldown_start_ms = ufskv_millis();
+                current_segment = UFSKV_MAX_SEGMENTS - 1;
+                open_segment(current_segment);
+                return false;
+            }
+            compact_in_cooldown = false;
+            current_segment = 1;  // seg0 = compacted data; fresh writes start at seg1
         }
 
         open_segment(current_segment);
+        return true;
     }
 
     /* -------- JOURNAL HELPERS -------- */
@@ -796,7 +819,7 @@ printf("[ufskv] Closing active file\n");
 
     /* -------- COMPACTION -------- */
 
-    void compact()
+    bool compact()
     {
 printf("[ufskv] Compacting storage...\n");
 
@@ -806,7 +829,7 @@ printf("[ufskv] Compacting storage...\n");
         char tmp_name[64]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
 printf("[ufskv] Opening tmp file: %s\n", tmp_name);
         FileHandle outf = fs->open(tmp_name, "wb");
-        if (!outf.ctx) { clear_journal(); return; }
+        if (!outf.ctx) { clear_journal(); return false; }
 
         // --- Phase 2: build per-segment sorted lists of live offsets ---
         struct LiveRec { uint32_t offset; std::vector<uint8_t> key; };
@@ -827,8 +850,9 @@ printf("[ufskv] Opening tmp file: %s\n", tmp_name);
         // --- Phase 3: one open/close per segment, read live records in offset order ---
         uint8_t key_buf[KV_MAX_KEY_LEN];
         uint8_t val_buf[UFSKV_MAX_VALUE];
+        bool write_ok = true;
 
-        for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS; s++) {
+        for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS && write_ok; s++) {
             if (per_seg[s].empty()) continue;
 
             char src_name[64]; segment_name(s, src_name);
@@ -846,10 +870,13 @@ printf("[ufskv] Opening src file: %s\n", src_name);
                 if (fs->read(src, key_buf, hdr.key_len) != hdr.key_len) continue;
                 if (hdr.length > 0 && fs->read(src, val_buf, hdr.length) != hdr.length) continue;
                 RecordCommit c; c.magic = MAGIC_COMMIT;
-                fs->write(outf, &hdr,    sizeof(hdr));
-                fs->write(outf, key_buf, hdr.key_len);
-                if (hdr.length > 0) fs->write(outf, val_buf, hdr.length);
-                fs->write(outf, &c,      sizeof(c));
+                uint32_t expected = sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
+                size_t written = 0;
+                written += fs->write(outf, &hdr,    sizeof(hdr));
+                written += fs->write(outf, key_buf, hdr.key_len);
+                if (hdr.length > 0) written += fs->write(outf, val_buf, hdr.length);
+                written += fs->write(outf, &c,      sizeof(c));
+                if (written != expected) { write_ok = false; break; }
             }
 
 printf("[ufskv] Closing src file: %s\n", src_name);
@@ -860,6 +887,13 @@ printf("[ufskv] Closing src file: %s\n", src_name);
 printf("[ufskv] Closing tmp file: %s\n", tmp_name);
         fs->close(outf);
 
+        if (!write_ok) {
+            printf("[ufskv] Compact aborted: storage full, segments preserved\n");
+            fs->remove(tmp_name);
+            clear_journal();   // journal is still COMPACTING — safe to discard
+            return false;
+        }
+
         // --- Phase 4: commit journal → safe to finalize ---
         write_journal(JOURNAL_COMMIT);
 
@@ -867,8 +901,7 @@ printf("[ufskv] Closing tmp file: %s\n", tmp_name);
 
         clear_journal();
 
-        // Reopen segment 0 as the active segment.
-        open_segment(0);
+        return true;
     }
 
 private:
