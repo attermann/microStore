@@ -26,6 +26,9 @@ New capabilities added
 	6.	Robin-hood hash table
 	7.	Crash-safe commit markers
 	8.	Filesystem-agnostic backend
+    9.  Journaled crash-safe compaction
+    10. Index-based compaction walk
+    11. Streaming iterator
 
 The design still follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
 
