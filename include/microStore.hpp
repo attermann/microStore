@@ -498,6 +498,115 @@ public:
 
 private:
 
+    /* -------- INDEX TYPES (hoisted so iterator can reference them) -------- */
+
+    struct VectorHash {
+        size_t operator()(const std::vector<uint8_t>& v) const {
+            uint32_t h = 2166136261u;
+            for(uint8_t b : v) { h ^= b; h *= 16777619u; }
+            return h;
+        }
+    };
+
+    struct IndexValue { uint32_t segment; uint32_t offset; uint32_t timestamp; };
+
+public:
+
+    /* -------- ENTRY -------- */
+
+    struct Entry {
+        std::vector<uint8_t> key;
+        std::vector<uint8_t> value;
+        uint32_t timestamp;
+    };
+
+    /* -------- ITERATOR -------- */
+
+    // Forward iterator over all live key-value records.
+    // Walks the in-memory index and reads one record's value from disk per step.
+    // WARNING: Mutating the store during iteration (put/remove/clear/compact) is
+    // undefined behaviour — unordered_map iterator invalidation rules apply.
+    class iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type        = Entry;
+        using difference_type   = std::ptrdiff_t;
+        using pointer           = const Entry*;
+        using reference         = const Entry&;
+
+        // Default constructor — produces a singular (non-dereferenceable) iterator.
+        iterator() : store_(nullptr) {}
+
+        reference operator*()  const { return current_; }
+        pointer   operator->() const { return &current_; }
+
+        iterator& operator++() {
+            ++pos_;
+            load();
+            return *this;
+        }
+
+        iterator operator++(int) {
+            iterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        bool operator==(const iterator& o) const { return pos_ == o.pos_; }
+        bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
+
+    private:
+        friend class Storage;
+
+        using idx_iter = std::unordered_map<std::vector<uint8_t>, IndexValue, VectorHash>::iterator;
+
+        iterator(Storage* store, idx_iter pos, idx_iter end)
+            : store_(store), pos_(pos), end_(end)
+        {
+            load();
+        }
+
+        void load() {
+            if (pos_ == end_) return;
+            const IndexValue& iv = pos_->second;
+            current_.key       = pos_->first;
+            current_.timestamp = iv.timestamp;
+
+            char name[64];
+            store_->segment_name(iv.segment, name);
+
+            FileHandle f = store_->fs->open(name, "rb");
+            if (!f.ctx) { current_.value.clear(); return; }
+
+            store_->fs->seek(f, (long)iv.offset, 0);
+            RecordHeader hdr;
+            store_->fs->read(f, &hdr, sizeof(hdr));
+            store_->fs->seek(f, (long)(iv.offset + sizeof(hdr) + hdr.key_len), 0);
+            current_.value.resize(hdr.length);
+            if (hdr.length > 0)
+                store_->fs->read(f, current_.value.data(), hdr.length);
+            store_->fs->close(f);
+        }
+
+        Storage*  store_;
+        idx_iter  pos_;
+        idx_iter  end_;
+        Entry     current_;
+    };
+
+    /* -------- BEGIN / END -------- */
+
+    iterator begin() {
+        flush_buffer();   // ensure pending writes are visible before iterating
+        return iterator(this, index.begin(), index.end());
+    }
+
+    iterator end() {
+        return iterator(this, index.end(), index.end());
+    }
+
+private:
+
     /* -------- BUFFERED WRITES -------- */
 
     void append(const void* data,size_t len)
@@ -528,16 +637,6 @@ private:
     }
 
     /* -------- INDEX -------- */
-
-    struct VectorHash {
-        size_t operator()(const std::vector<uint8_t>& v) const {
-            uint32_t h = 2166136261u;
-            for(uint8_t b : v) { h ^= b; h *= 16777619u; }
-            return h;
-        }
-    };
-
-    struct IndexValue { uint32_t segment; uint32_t offset; uint32_t timestamp; };
 
     IndexValue* index_find(const uint8_t* key, uint8_t key_len)
     {
