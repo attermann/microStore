@@ -15,7 +15,7 @@ Features
 - automatic compaction
 - filesystem agnostic
 
-Below is a single-header C++ implementation called UltraFileSystemKV that incorporates the previous design plus the two additional improvements:
+Below is a single-header C++ implementation called microStore that incorporates the previous design plus the two additional improvements:
 
 New capabilities added
 	1.	Persistent hash index file → near-instant boot (no full log scan)
@@ -38,7 +38,7 @@ The design still follows the log-structured KV architecture used by systems such
 #include <vector>
 #include <unordered_map>
 
-namespace UltraFileSystemKV
+namespace microStore
 {
 
 /* ---------------- CONFIG ---------------- */
@@ -845,6 +845,9 @@ printf("[ufskv] Removing tmp file: %s\n", tmp_name);
             fs->remove(tmp_name);
             return false;
         }
+
+        // CBA TODO: Below is NOT atomic. Interruption between deleting seg0 and renaming the
+        // tmp file to new seg0 will resultin data loss!
 
         // Phase 2: atomically replace old segments.
         char seg0[64];
