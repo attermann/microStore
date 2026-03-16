@@ -64,38 +64,28 @@ public:
 public:
 
 	bool format() {
-		try {
-			if (!LittleFS.format()) {
-				return false;
-			}
-			return true;
+		if (!LittleFS.format()) {
+			return false;
 		}
-		catch (std::exception& e) {
-		}
-		return false;
+		return true;
 	}
 
 
 	virtual bool init() override {
-		try {
-			// Initialize LittleFS
-			if (!LittleFS.begin(true, "")) {
-				return false;
-			}
-/*
-			// Ensure filesystem is writable and reformat if not
-			RNS::Bytes test("test");
-			if (writeFile("/test", test) < 4) {
-				format();
-			}
-			else {
-				remove("/test");
-			}
-*/
-		}
-		catch (std::exception& e) {
+		// Initialize LittleFS
+		if (!LittleFS.begin(true, "")) {
 			return false;
 		}
+/*
+		// Ensure filesystem is writable and reformat if not
+		RNS::Bytes test("test");
+		if (writeFile("/test", test) < 4) {
+			format();
+		}
+		else {
+			remove("/test");
+		}
+*/
 		return true;
 	}
 

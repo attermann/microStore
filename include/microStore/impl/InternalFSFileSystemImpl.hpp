@@ -66,38 +66,28 @@ public:
 public:
 
 	bool format() {
-		try {
-			if (!FS.format()) {
-				return false;
-			}
-			return true;
+		if (!FS.format()) {
+			return false;
 		}
-		catch (std::exception& e) {
-		}
-		return false;
+		return true;
 	}
 
 
 	virtual bool init() override {
-		try {
-			// Initialize InternalFileSystem
-			if (!InternalFS.begin()) {
-				return false;
-			}
-/*
-			// Ensure filesystem is writable and reformat if not
-			RNS::Bytes test("test");
-			if (writeFile("/test", test) < 4) {
-				format();
-			}
-			else {
-				remove("/test");
-			}
-*/
-		}
-		catch (std::exception& e) {
+		// Initialize InternalFileSystem
+		if (!InternalFS.begin()) {
 			return false;
 		}
+/*
+		// Ensure filesystem is writable and reformat if not
+		RNS::Bytes test("test");
+		if (writeFile("/test", test) < 4) {
+			format();
+		}
+		else {
+			remove("/test");
+		}
+*/
 		return true;
 	}
 

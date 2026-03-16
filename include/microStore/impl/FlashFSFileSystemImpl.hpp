@@ -87,41 +87,31 @@ public:
 public:
 
 	bool format() {
-		try {
-			if (!FlashFS.format()) {
-				return false;
-			}
-			return true;
+		if (!FlashFS.format()) {
+			return false;
 		}
-		catch (std::exception& e) {
-		}
-		return false;
+		return true;
 	}
 
 
 	virtual bool init() override {
-		try {
-			// Initialize FlashFileSystem
-			if (!g_flash.begin(&g_RAK15001)) {
-				return false;
-			}
-			if (!FlashFS.begin(&g_flash)) {
-				return false;
-			}
-/*
-			// Ensure filesystem is writable and reformat if not
-			RNS::Bytes test("test");
-			if (writeFile("/test", test) < 4) {
-				format();
-			}
-			else {
-				remove("/test");
-			}
-*/
-		}
-		catch (std::exception& e) {
+		// Initialize FlashFileSystem
+		if (!g_flash.begin(&g_RAK15001)) {
 			return false;
 		}
+		if (!FlashFS.begin(&g_flash)) {
+			return false;
+		}
+/*
+		// Ensure filesystem is writable and reformat if not
+		RNS::Bytes test("test");
+		if (writeFile("/test", test) < 4) {
+			format();
+		}
+		else {
+			remove("/test");
+		}
+*/
 		return true;
 	}
 
