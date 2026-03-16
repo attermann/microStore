@@ -203,7 +203,7 @@ public:
 
 	virtual bool exists(const char* path) override {
 		int fd = ::open(path, O_RDONLY);
-		if (fd != 0) {
+		if (fd != -1) {
 			::close(fd);
 			return true;
 		}

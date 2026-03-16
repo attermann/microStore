@@ -869,7 +869,7 @@ printf("[mstore] Rotating segment...\n");
             char sname[KV_MAX_FILENAME_LEN]; segment_name(i, sname);
             fs.remove(sname);
         }
-        if (fs.rename(tmp_name, seg0) != 0) {
+        if (!fs.rename(tmp_name, seg0)) {
             fs.remove(tmp_name);
             return;
         }
