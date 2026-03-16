@@ -4,6 +4,9 @@
 #if defined(MICROSTORE_USE_POSIXFS)
 #include "microStore/impl/PosixFileSystemImpl.hpp"
 #endif
+#if defined(MICROSTORE_USE_STDIOFS)
+#include "microStore/impl/StdioFileSystemImpl.hpp"
+#endif
 #if defined(MICROSTORE_USE_LITTLEFS)
 #include "microStore/impl/LittleFSFileSystemImpl.hpp"
 #endif

@@ -2,12 +2,12 @@
 
 #if defined(MICROSTORE_USE_LITTLEFS)
 
-#include "LittleFSFileImpl.hpp"
-
-#include "../FileSystem.hpp"
 #include "../File.hpp"
+#include "../FileSystem.hpp"
 
 #include <LittleFS.h>
+
+namespace microStoreImpl {
 
 class LittleFSFileSystemImpl : public microStore::FileSystemImpl {
 
@@ -26,19 +26,35 @@ protected:
 	public:
 		inline virtual const char* name() const { return _file->name(); }
 		inline virtual size_t size() const { return _file->size(); }
-		inline virtual void close() { _closed = true; _file->close(); }
+		inline virtual void close() { _file->close(); _closed = true; }
 
-		// Print overrides
-		inline virtual size_t write(uint8_t byte) { return _file->write(byte); }
-		inline virtual size_t write(const uint8_t *buffer, size_t size) { return _file->write(buffer, size); }
-
-		// Stream overrides
-		inline virtual int available() { return _file->available(); }
 		inline virtual int read() { return _file->read(); }
+		inline virtual size_t write(uint8_t ch) { return _file->write(ch); }
+		inline virtual size_t read(uint8_t* buffer, size_t size) { return _file->read((uint8_t*)buffer, size); }
+		inline virtual size_t write(const uint8_t* buffer, size_t size) { return _file->write((uint8_t*)buffer, size); }
+
+		inline virtual int available() { return _file->available(); }
 		inline virtual int peek() { return _file->peek(); }
+		inline virtual size_t tell() { return _file->position(); }
+		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
+			fs::SeekMode smode;
+			switch (mode) {
+				case microStore::SeekMode::SeekModeCur:
+					smode = fs::SeekMode::SeekCur;
+					break;
+				case microStore::SeekMode::SeekModeEnd:
+					smode = fs::SeekMode::SeekEnd;
+					break;
+				case microStore::SeekMode::SeekModeSet:
+				default:
+					smode = fs::SeekMode::SeekSet;
+					break;
+			}
+			return _file->seek(pos, smode);
+		}
 		inline virtual void flush() { _file->flush(); }
 
-		inline virtual bool isValid() const { return (_file) && !_closed; }
+		inline virtual bool isValid() const { if (!_file) return false; return !_closed; }
 
 	};
 
@@ -84,19 +100,26 @@ public:
 	}
 
 
-	virtual microStore::File open(const char* path, microStore::File::MODE mode, const bool create = false) override {
+	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
 		const char* pmode;
-		if (mode == microStore::File::MODE_READ) {
-			pmode = FILE_READ;
-		}
-		else if (mode == microStore::File::MODE_WRITE) {
-			pmode = FILE_WRITE;
-		}
-		else if (mode == microStore::File::MODE_APPEND) {
-			pmode = FILE_APPEND;
-		}
-		else {
-			return {};
+		switch (mode) {
+			case microStore::File::ModeRead:
+				pmode = FILE_READ;
+				break;
+			case microStore::File::ModeWrite:
+				pmode = FILE_WRITE;
+				break;
+			case microStore::File::ModeAppend:
+				pmode = FILE_APPEND;
+				break;
+			case microStore::File::ModeReadWrite:
+				pmode = "w+";
+				break;
+			case microStore::File::ModeReadAppend:
+				pmode = "a+";
+				break;
+			default:
+				return {};
 		}
 		// CBA Using copy constructor to obtain File*
 		File* file = new File(LittleFS.open(path, pmode));
@@ -208,5 +231,7 @@ public:
 	}
 
 };
+
+}
 
 #endif

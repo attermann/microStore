@@ -32,8 +32,8 @@ static int find_file(const char* name) {
     return -1;
 }
 
-static microStore::FileHandle ram_open(const char* name, const char* mode) {
-    microStore::FileHandle fh; fh.ctx = nullptr;
+static microStore::File ram_open(const char* name, const char* mode) {
+    microStore::File fh; fh.ctx = nullptr;
 
     bool rd = (strchr(mode, 'r') != nullptr);
     bool wr = (strchr(mode, 'w') != nullptr);
@@ -74,7 +74,7 @@ static microStore::FileHandle ram_open(const char* name, const char* mode) {
     return fh;
 }
 
-static size_t ram_read(microStore::FileHandle fh, void* buf, size_t len) {
+static size_t ram_read(microStore::File fh, void* buf, size_t len) {
     int idx = (int)(intptr_t)fh.ctx - 1;
     RamFile& f = g_files[idx];
     size_t avail = f.data.size() - f.pos;
@@ -84,7 +84,7 @@ static size_t ram_read(microStore::FileHandle fh, void* buf, size_t len) {
     return n;
 }
 
-static size_t ram_write(microStore::FileHandle fh, const void* buf, size_t len) {
+static size_t ram_write(microStore::File fh, const void* buf, size_t len) {
     int idx = (int)(intptr_t)fh.ctx - 1;
     RamFile& f = g_files[idx];
     if (f.append_mode) f.pos = f.data.size();
@@ -95,7 +95,7 @@ static size_t ram_write(microStore::FileHandle fh, const void* buf, size_t len) 
     return len;
 }
 
-static int ram_seek(microStore::FileHandle fh, long off, int whence) {
+static int ram_seek(microStore::File fh, long off, int whence) {
     int idx = (int)(intptr_t)fh.ctx - 1;
     RamFile& f = g_files[idx];
     size_t new_pos;
@@ -106,14 +106,14 @@ static int ram_seek(microStore::FileHandle fh, long off, int whence) {
     return 0;
 }
 
-static long ram_tell(microStore::FileHandle fh) {
+static long ram_tell(microStore::File fh) {
     int idx = (int)(intptr_t)fh.ctx - 1;
     return (long)g_files[idx].pos;
 }
 
-static int  ram_flush(microStore::FileHandle) { return 0; }
+static int  ram_flush(microStore::File) { return 0; }
 
-static int  ram_close(microStore::FileHandle fh) {
+static int  ram_close(microStore::File fh) {
     int idx = (int)(intptr_t)fh.ctx - 1;
     g_files[idx].open = false;
     return 0;

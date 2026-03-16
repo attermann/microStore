@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_POSIXFS)
+#if defined(MICROSTORE_USE_STDIOFS)
 
 #include "../File.hpp"
 #include "../FileSystem.hpp"
@@ -12,29 +12,28 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <fcntl.h>
 
 namespace microStoreImpl {
 
-class PosixFileSystemImpl : public microStore::FileSystemImpl {
+class StdioFileSystemImpl : public microStore::FileSystemImpl {
 
 protected:
 
 	class FileImpl : public microStore::FileImpl {
 
 	private:
-		int _fd = -1;
+		FILE* _file = nullptr;
 		bool _closed = false;
 		size_t _available = 0;
 		char _filename[1024];
 
 	public:
-		FileImpl(int fd) : microStore::FileImpl(), _fd(fd) { _available = size(); }
+		FileImpl(FILE* file) : microStore::FileImpl(), _file(file) { _available = size(); }
 		virtual ~FileImpl() { if (!_closed) close(); }
 
 	public:
 		inline virtual const char* name() const {
-			assert(_fd != -1);
+			assert(_file != nullptr);
 #if 0
 			char proclnk[1024];
 			snprintf(proclnk, sizeof(proclnk), "/proc/self/fd/%d", fileno(_file));
@@ -55,63 +54,55 @@ protected:
 		}
 
 		inline virtual size_t size() const {
-			assert(_fd != -1);
+			assert(_file != nullptr);
 			struct stat st;
-			::fstat(_fd, &st);
+			::fstat(fileno(_file), &st);
 			return st.st_size;
 		}
 
 		inline virtual void close() {
-			assert(_fd != -1);
-			::close(_fd);
+			assert(_file != nullptr);
+			::fclose(_file);
 			_closed = true;
-			_fd = -1;
+			_file = nullptr;
 		}
 
 		inline virtual int read() {
 			if (_available <= 0) {
 				return EOF;
 			}
-			assert(_fd != -1);
-			uint8_t ch;
-			int status = ::read(_fd, &ch, 1);
-			if (status < 1) {
-				return EOF;
+			assert(_file != nullptr);
+			int ch = ::fgetc(_file);
+			if (ch == EOF) {
+				return ch;
 			}
 			--_available;
 			return ch;
 		}
 		inline virtual size_t write(uint8_t ch) {
-			assert(_fd != -1);
-			ssize_t status = ::write(_fd, &ch, 1);
-			if (status < 1) {
-				return status;
+			assert(_file != nullptr);
+			if (::fputc(ch, _file) == EOF) {
+				return 0;
 			}
 			++_available;
 			return 1;
 		}
 		inline virtual size_t read(uint8_t* buffer, size_t size) {
-			assert(_fd != -1);
-		    ssize_t read = ::read(_fd, buffer, size);
-			if (read < 0) {
-				return 0;
-			}
+			assert(_file != nullptr);
+			size_t read = ::fread(buffer, sizeof(uint8_t), size, _file);
 			_available -= read;
-			return (size_t)read;
+			return read;
 		}
 		inline virtual size_t write(const uint8_t* buffer, size_t size) {
-			assert(_fd != -1);
-		    ssize_t wrote = ::write(_fd, buffer, size);
-			if (wrote < 0) {
-				return 0;
-			}
+			assert(_file != nullptr);
+			size_t wrote = ::fwrite(buffer, sizeof(uint8_t), size, _file);
 			_available += wrote;
-			return (size_t)wrote;
+			return wrote;
 		}
 
 		inline virtual int available() {
 #if 0
-			assert(_fd != -1);
+			assert(_file != nullptr);
 			int size = 0;
 			::ioctl(::fileno(_file), FIONREAD, &size);
 			return size;
@@ -123,21 +114,17 @@ protected:
 			if (_available <= 0) {
 				return EOF;
 			}
-			assert(_fd != -1);
-			uint8_t ch;
-			int status = ::read(_fd, &ch, 1);
-			if (status < 1) {
-				return EOF;
-			}
-			::lseek(_fd, -1, SEEK_CUR);
+			assert(_file != nullptr);
+			int ch = ::fgetc(_file);
+			::ungetc(ch, _file);
 			return ch;
 		}
 		inline virtual size_t tell() {
-			assert(_fd != -1);
-		    return ::lseek(_fd, 0, SEEK_CUR);
+			assert(_file != nullptr);
+			return (size_t)::ftell(_file);
 		}
 		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
-			assert(_fd != -1);
+			assert(_file != nullptr);
 			int whence;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
@@ -151,19 +138,19 @@ protected:
 					whence = SEEK_SET;
 					break;
 			}
-		    return ::lseek(_fd, pos, whence);
+			return ::fseek(_file, pos, whence);
 		}
 		inline virtual void flush() {
-			assert(_fd != -1);
-			::fsync(_fd);
+			assert(_file != nullptr);
+			::fflush(_file);
 		}
 
-		inline virtual bool isValid() const { if (_fd == -1) return false; return !_closed; }
+		inline virtual bool isValid() const { if (_file == nullptr) return false; return !_closed; }
 
 	};
 
 public:
-	PosixFileSystemImpl() {}
+	StdioFileSystemImpl() {}
 
 public:
 
@@ -172,46 +159,45 @@ public:
 	}
 
 	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
-	    int flags;
+		const char* pmode;
 		switch (mode) {
 			case microStore::File::ModeRead:
-				flags = O_RDONLY;
+				pmode = "r";
 				break;
 			case microStore::File::ModeWrite:
-				flags = O_WRONLY|O_CREAT|O_TRUNC;
+				pmode = "w";
 				break;
 			case microStore::File::ModeAppend:
-				flags = O_WRONLY|O_CREAT|O_APPEND;
+				pmode = "a";
 				break;
 			case microStore::File::ModeReadWrite:
-				flags = O_RDWR|O_CREAT|O_TRUNC;
+				pmode = "w+";
 				break;
 			case microStore::File::ModeReadAppend:
-				flags = O_RDWR|O_CREAT|O_APPEND;
+				pmode = "a+";
 				break;
 			default:
-				//flags = O_RDWR|O_CREAT;
 				return {};
 		}
-		int fd = ::open(path, flags, 0644);
-		if (fd == -1) {
+		FILE* file = ::fopen(path, pmode);
+		if (file == nullptr) {
 			return {};
 		}
-		return microStore::File(new FileImpl(fd));
+		return microStore::File(new FileImpl(file));
 	}
 
 
 	virtual bool exists(const char* path) override {
-		int fd = ::open(path, O_RDONLY);
-		if (fd != 0) {
-			::close(fd);
+		FILE* file = ::fopen(path, "r");
+		if (file != nullptr) {
+			::fclose(file);
 			return true;
 		}
 		return false;
 	}
 
 	virtual bool remove(const char* path) override {
-		return (::unlink(path) == 0);
+		return (::remove(path) == 0);
 	}
 
 	virtual bool rename(const char* from_path, const char* to_path) override {

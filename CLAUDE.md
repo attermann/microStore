@@ -9,13 +9,14 @@ pio run -e native                    # Build native (desktop) target
 pio run -e heltec_wifi_lora_32_V3   # Build for ESP32 LoRa
 pio run -e wiscore_rak4631          # Build for nRF52 LoRa
 pio test -e native                  # Run tests on native target
+pio test -e native -f test_iterator # Run a specific test suite
 ```
 
 The native environment produces `.pio/build/native/program`. All environments use `-std=gnu++14`.
 
 ## Architecture
 
-microStore is a **single-header** (`include/microStore.hpp`) persistent key-value store for embedded systems, inspired by Bitcask. All logic lives in that one file — there are no `.cpp` files.
+microStore is a persistent key-value store for embedded systems, inspired by Bitcask. All logic lives in the `include/microStore/` directory — there are no `.cpp` files.
 
 ### Core Design
 
@@ -33,16 +34,36 @@ microStore is a **single-header** (`include/microStore.hpp`) persistent key-valu
 | `RecordCommit` | `0xFACEB00C` | Commit marker appended after each successful write |
 | `Journal` | `0x4B564A4E` | Crash recovery state for compaction |
 
+### Header Layout
+
+| File | Purpose |
+|------|---------|
+| `include/microStore/Store.hpp` | KV store engine — the main library logic |
+| `include/microStore/FileSystem.hpp` | OOP filesystem abstraction (`FileSystem` / `FileSystemImpl`) |
+| `include/microStore/File.hpp` | OOP file abstraction (`File` / `FileImpl`) with integrated CRC-32 |
+| `include/microStore/Crc.hpp` | CRC-32 utility |
+| `include/microStore/impl/` | Platform-specific `FileSystemImpl` backends |
+
 ### Filesystem Abstraction
 
-The `FileSystemInterface` struct is a callback table (open, read, write, seek, tell, flush, close, remove, rename). Callers provide their own implementation — the library is not tied to LittleFS, SPIFFS, or any specific filesystem.
+`Store.hpp` uses `FileSystem` and `File` directly (the OOP layer from `FileSystem.hpp` / `File.hpp`). `FileSystem` wraps a `shared_ptr<FileSystemImpl>`; `Store::init()` takes a `FileSystem` by value. Platform backends implement `FileSystemImpl` and are selected by build flag:
+
+| Build Flag | Backend | Platform |
+|-----------|---------|---------|
+| `MICROSTORE_USE_POSIXFS` | `PosixFileSystemImpl` | native (Linux/macOS) |
+| `MICROSTORE_USE_LITTLEFS` | `LittleFSFileSystemImpl` | ESP32 |
+| `MICROSTORE_USE_SPIFFS` | `SPIFFSFileSystemImpl` | ESP32 |
+| `MICROSTORE_USE_INTERNALFS` | `InternalFSFileSystemImpl` | nRF52 |
+| `MICROSTORE_USE_FLASHFS` | `FlashFSFileSystemImpl` | nRF52 + SPI flash |
+
+`File` accumulates a running CRC-32 on every read/write transparently; call `file.crc()` to retrieve it. To add a new platform, subclass `FileSystemImpl` and `FileImpl`.
 
 ### Platform Detection
 
 - `PLATFORM_NATIVE`: uses `std::chrono` for timestamps
 - `PLATFORM_ESP32` / `PLATFORM_NRF52`: uses Arduino's `millis()`
 
-### Configuration Macros (top of microStore.hpp)
+### Configuration Macros (top of Store.hpp)
 
 | Macro | Default | Meaning |
 |-------|---------|---------|
@@ -53,11 +74,14 @@ The `FileSystemInterface` struct is a callback table (open, read, write, seek, t
 | `KV_MAX_KEY_LEN` | 64 | Max key length in bytes |
 | `UFSKV_COMPACT_RETRY_MS` | 60000 | Compaction cooldown (ms) |
 
-### Public API (`microStore::Storage`)
+### Public API (`microStore::Store`)
 
-- `init(fs, prefix)` — initialize with filesystem interface and file name prefix
+Include as `#include <microStore/Store.hpp>`. The library is header-only; `src/` is intentionally empty (`srcFilter: [-<*>]` in `library.json`).
+
+- `init(FileSystem fs, const char* prefix)` — initialize with a `FileSystem` instance and file name prefix
 - `put(key, ts, data, len)` — write key-value (overloads for `uint8_t*`, `char*`, `std::vector`)
 - `get(key, out, len)` — read value
 - `remove(key)` — logical delete
 - `clear()` — wipe all data
 - `dumpInfo(detailed)` — print storage statistics
+- Range-based for loop supported via `begin()`/`end()` returning a forward iterator over `Store::Entry` (key, value, timestamp)

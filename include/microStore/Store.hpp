@@ -34,6 +34,9 @@ The design still follows the log-structured KV architecture used by systems such
 
 */
 
+#include "File.hpp"
+#include "FileSystem.hpp"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -113,26 +116,6 @@ static inline uint32_t ufskv_millis()
 }
 #endif
 
-/* ---------------- FILESYSTEM INTERFACE ---------------- */
-
-struct FileHandle
-{
-    void* ctx;
-};
-
-struct FileSystemInterface
-{
-    FileHandle (*open)(const char*, const char*);
-    size_t (*read)(FileHandle, void*, size_t);
-    size_t (*write)(FileHandle, const void*, size_t);
-    int (*seek)(FileHandle, long, int);
-    long (*tell)(FileHandle);
-    int (*flush)(FileHandle);
-    int (*close)(FileHandle);
-    int (*remove)(const char*);
-    int (*rename)(const char*, const char*);
-};
-
 /* ---------------- RECORD STRUCTURES ---------------- */
 
 #pragma pack(push,1)
@@ -179,13 +162,11 @@ public:
     Store()
     {
         write_buf_pos = 0;
-        active_file.ctx = nullptr;
-        index_file.ctx = nullptr;
     }
 
-    bool init(FileSystemInterface* iface,const char* prefix)
+    bool init(FileSystem filesystem,const char* prefix)
     {
-        fs = iface;
+        fs = filesystem;
         strncpy(base_prefix,prefix,sizeof(base_prefix));
 
         recover_if_needed();
@@ -202,8 +183,8 @@ public:
         {
             char name[KV_MAX_FILENAME_LEN];
             segment_name(i, name);
-            FileHandle f = fs->open(name, "rb");
-            if (f.ctx) { fs->close(f); resume_seg = i; }
+            File f = fs.open(name, File::ModeRead);
+            if (f) { f.close(); resume_seg = i; }
         }
 
         open_segment(resume_seg);
@@ -215,16 +196,16 @@ public:
     {
         char name[KV_MAX_FILENAME_LEN];
 
-        if(index_file.ctx) { fs->close(index_file); index_file.ctx = nullptr; }
+        if(index_file) { index_file.close(); }
 
         for(uint32_t i=0;i<UFSKV_MAX_SEGMENTS;i++)
         {
             segment_name(i,name);
-            fs->remove(name);
+            fs.remove(name);
         }
 
         index_name(name);
-        fs->remove(name);
+        fs.remove(name);
 
         index.clear();
         current_segment=0;
@@ -306,21 +287,32 @@ public:
         char name[KV_MAX_FILENAME_LEN];
         segment_name(e->segment,name);
 
-        FileHandle f=fs->open(name,"rb");
-        if(!f.ctx) return false;
+        File f=fs.open(name,File::ModeRead);
+        if(!f) return false;
 
-        fs->seek(f,e->offset,0);
+        f.seek(e->offset,SeekModeSet);
 
         RecordHeader hdr;
-        fs->read(f,&hdr,sizeof(hdr));
+        if (f.read(&hdr,sizeof(hdr)) != sizeof(hdr) ||
+            hdr.magic   != MAGIC_RECORD              ||
+            hdr.key_len  > KV_MAX_KEY_LEN            ||
+            hdr.length   > UFSKV_MAX_VALUE           ||
+            (out != nullptr && hdr.length > *len))
+        {
+printf("[mstore] Found corrupted record!\n");
+            f.close();
+            return false;
+        }
 
-        fs->seek(f,(long)(e->offset+sizeof(hdr)+hdr.key_len),0);
+        // CBA If this is only a size request then skip reading value
+        if (out != nullptr) {
+            f.seek((long)(e->offset+sizeof(hdr)+hdr.key_len),SeekModeSet);
+            f.read(out,hdr.length);
+        }
 
         *len=hdr.length;
 
-        fs->read(f,out,hdr.length);
-
-        fs->close(f);
+        f.close();
 
         return true;
     }
@@ -410,8 +402,8 @@ public:
             char name[KV_MAX_FILENAME_LEN];
             segment_name(seg, name);
 
-            FileHandle f = fs->open(name, "rb");
-            if (!f.ctx) break;  // segments are contiguous; first missing one ends the scan
+            File f = fs.open(name, File::ModeRead);
+            if (!f) break;  // segments are contiguous; first missing one ends the scan
 
             uint32_t file_size = 0;
             uint32_t entries = 0;
@@ -421,16 +413,16 @@ public:
             uint32_t dead_bytes = 0;
 
             {
-                fs->seek(f, 0, SEEK_END);
-                file_size = (uint32_t)fs->tell(f);
-                fs->seek(f, 0, 0);
+                f.seek(0, SeekModeEnd);
+                file_size = (uint32_t)f.tell();
+                f.seek(0, SeekModeSet);
 
                 while(true)
                 {
-                    uint32_t offset = (uint32_t)fs->tell(f);
+                    uint32_t offset = (uint32_t)f.tell();
 
                     RecordHeader hdr;
-                    if(fs->read(f, &hdr, sizeof(hdr)) != sizeof(hdr))
+                    if(f.read(&hdr, sizeof(hdr)) != sizeof(hdr))
                         break;
 
                     if(hdr.magic != MAGIC_RECORD)
@@ -440,13 +432,13 @@ public:
                         break;
 
                     uint8_t key[KV_MAX_KEY_LEN];
-                    if(fs->read(f, key, hdr.key_len) != hdr.key_len)
+                    if(f.read(key, hdr.key_len) != hdr.key_len)
                         break;
 
-                    fs->seek(f, (long)(offset + sizeof(hdr) + hdr.key_len + hdr.length), 0);
+                    f.seek((long)(offset + sizeof(hdr) + hdr.key_len + hdr.length), SeekModeSet);
 
                     RecordCommit c;
-                    if(fs->read(f, &c, sizeof(c)) != sizeof(c))
+                    if(f.read(&c, sizeof(c)) != sizeof(c))
                         break;
 
                     if(c.magic != MAGIC_COMMIT)
@@ -473,7 +465,7 @@ public:
                     }
                 }
 
-                fs->close(f);
+                f.close();
             }
 
             total_file_size += file_size;
@@ -583,17 +575,17 @@ public:
             char name[KV_MAX_FILENAME_LEN];
             store_->segment_name(iv.segment, name);
 
-            FileHandle f = store_->fs->open(name, "rb");
-            if (!f.ctx) { current_.value.clear(); return; }
+            File f = store_->fs.open(name, File::ModeRead);
+            if (!f) { current_.value.clear(); return; }
 
-            store_->fs->seek(f, (long)iv.offset, 0);
+            f.seek((long)iv.offset, SeekModeSet);
             RecordHeader hdr;
-            store_->fs->read(f, &hdr, sizeof(hdr));
-            store_->fs->seek(f, (long)(iv.offset + sizeof(hdr) + hdr.key_len), 0);
+            f.read(&hdr, sizeof(hdr));
+            f.seek((long)(iv.offset + sizeof(hdr) + hdr.key_len), SeekModeSet);
             current_.value.resize(hdr.length);
             if (hdr.length > 0)
-                store_->fs->read(f, current_.value.data(), hdr.length);
-            store_->fs->close(f);
+                f.read(current_.value.data(), hdr.length);
+            f.close();
         }
 
         Store*  store_;
@@ -639,8 +631,8 @@ private:
 
     void flush_buffer()
     {
-        fs->write(active_file,write_buf,write_buf_pos);
-        fs->flush(active_file);
+        active_file.write(write_buf,write_buf_pos);
+        active_file.flush();
         write_buf_pos=0;
     }
 
@@ -669,14 +661,14 @@ private:
 
     bool persist_index_entry(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
     {
-        if (!index_file.ctx) return false;
+        if (!index_file) return false;
 
-        fs->write(index_file, &key_len, 1);
-        fs->write(index_file, key, key_len);
-        fs->write(index_file, &seg, 4);
-        fs->write(index_file, &off, 4);
-        fs->write(index_file, &ts, 4);
-        fs->flush(index_file);  // explicit fsync — guarantees entry reaches flash
+        index_file.write(&key_len, 1);
+        index_file.write(key, key_len);
+        index_file.write(&seg, 4);
+        index_file.write(&off, 4);
+        index_file.write(&ts, 4);
+        index_file.flush();  // explicit fsync — guarantees entry reaches flash
 
         return true;
     }
@@ -686,8 +678,8 @@ private:
         char name[KV_MAX_FILENAME_LEN];
         index_name(name);
 
-        FileHandle f = fs->open(name, "ab");
-        if (!f.ctx) return false;
+        File f = fs.open(name, File::ModeAppend);
+        if (!f) return false;
 
         for (auto& kv : index)
         {
@@ -696,15 +688,15 @@ private:
             uint32_t off     = kv.second.offset;
             uint32_t ts      = kv.second.timestamp;
 
-            fs->write(f, &key_len, 1);
-            fs->write(f, kv.first.data(), key_len);
-            fs->write(f, &seg, 4);
-            fs->write(f, &off, 4);
-            fs->write(f, &ts, 4);
+            f.write(&key_len, 1);
+            f.write(kv.first.data(), key_len);
+            f.write(&seg, 4);
+            f.write(&off, 4);
+            f.write(&ts, 4);
         }
 
-        fs->flush(f);
-        fs->close(f);
+        f.flush();
+        f.close();
         return true;
     }
 
@@ -713,8 +705,8 @@ private:
         char name[KV_MAX_FILENAME_LEN];
         index_name(name);
 
-        FileHandle f=fs->open(name,"rb");
-        if(!f.ctx) return false;
+        File f=fs.open(name,File::ModeRead);
+        if(!f) return false;
 
         while(true)
         {
@@ -723,13 +715,13 @@ private:
             uint32_t seg;
             uint32_t off;
 
-            if(fs->read(f, &key_len, 1) != 1) break;
+            if(f.read(&key_len, 1) != 1) break;
             if(key_len > KV_MAX_KEY_LEN) break;
-            if(fs->read(f, key, key_len) != key_len) break;
-            if(fs->read(f, &seg, 4) != 4) break;
-            if(fs->read(f, &off, 4) != 4) break;
+            if(f.read(key, key_len) != key_len) break;
+            if(f.read(&seg, 4) != 4) break;
+            if(f.read(&off, 4) != 4) break;
             uint32_t ts = 0;
-            if(fs->read(f, &ts, 4) != 4) break;
+            if(f.read(&ts, 4) != 4) break;
 
             // seg==0xFFFFFFFF is a deletion sentinel written by remove()
             if(seg==0xFFFFFFFF)
@@ -738,7 +730,7 @@ private:
                 index_insert(key, key_len, seg, off, ts);
         }
 
-        fs->close(f);
+        f.close();
 
 		return true;
     }
@@ -749,7 +741,7 @@ private:
     {
         char name[KV_MAX_FILENAME_LEN];
         index_name(name);
-        index_file = fs->open(name, "ab");
+        index_file = fs.open(name, File::ModeAppend);
     }
 
     /* -------- SEGMENTS -------- */
@@ -771,19 +763,16 @@ private:
 
     void open_segment(uint32_t id)
     {
-        if (active_file.ctx) {
-            fs->close(active_file);
-            active_file.ctx = nullptr;
-        }
+        if (active_file) { active_file.close(); }
 
         char name[KV_MAX_FILENAME_LEN];
         segment_name(id,name);
 
-printf("[ufskv] Opening active file: %s\n", name);
-        active_file = fs->open(name,"ab+");
+printf("[mstore] Opening active file: %s\n", name);
+        active_file = fs.open(name,File::ModeReadAppend);
         current_segment=id;
-        fs->seek(active_file,0,SEEK_END);
-        current_offset=fs->tell(active_file);
+        active_file.seek(0,SeekModeEnd);
+        current_offset=active_file.tell();
     }
 
     bool rotate_segment_if_needed(uint32_t write_size)
@@ -791,13 +780,10 @@ printf("[ufskv] Opening active file: %s\n", name);
         if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < UFSKV_SEGMENT_SIZE)
             return true;
 
-printf("[ufskv] Rotating segment...\n");
+printf("[mstore] Rotating segment...\n");
         flush_buffer();
 
-        if (active_file.ctx) {
-            fs->close(active_file);
-            active_file.ctx = nullptr;
-        }
+        if (active_file) { active_file.close(); }
 
         current_segment++;
 
@@ -805,7 +791,7 @@ printf("[ufskv] Rotating segment...\n");
             if (compact_in_cooldown &&
                 (ufskv_millis() - compact_cooldown_start_ms) < UFSKV_COMPACT_RETRY_MS)
             {
-                printf("[ufskv] Compact skipped: cooldown active\n");
+                printf("[mstore] Compact skipped: cooldown active\n");
                 current_segment = UFSKV_MAX_SEGMENTS - 1;
                 open_segment(current_segment);
                 return false;
@@ -830,32 +816,32 @@ printf("[ufskv] Rotating segment...\n");
     void write_journal(uint32_t state)
     {
         char name[KV_MAX_FILENAME_LEN]; journal_name(name);
-        FileHandle f = fs->open(name, "wb");
-        if (!f.ctx) return;
+        File f = fs.open(name, File::ModeWrite);
+        if (!f) return;
         Journal j; j.magic = JOURNAL_MAGIC; j.state = state;
-        fs->write(f, &j, sizeof(j));
-        fs->flush(f);
-        fs->close(f);
+        f.write(&j, sizeof(j));
+        f.flush();
+        f.close();
     }
 
     void clear_journal()
     {
         char name[KV_MAX_FILENAME_LEN]; journal_name(name);
-        fs->remove(name);
+        fs.remove(name);
     }
 
     void recover_if_needed()
     {
         char name[KV_MAX_FILENAME_LEN]; journal_name(name);
-        FileHandle f = fs->open(name, "rb");
-        if (!f.ctx) return;
+        File f = fs.open(name, File::ModeRead);
+        if (!f) return;
 
         Journal j;
-        size_t n = fs->read(f, &j, sizeof(j));
-        fs->close(f);
+        size_t n = f.read(&j, sizeof(j));
+        f.close();
 
         if (n != sizeof(j) || j.magic != JOURNAL_MAGIC) {
-            fs->remove(name);
+            fs.remove(name);
             return;
         }
 
@@ -865,10 +851,10 @@ printf("[ufskv] Rotating segment...\n");
         } else {
             // COMPACTING: tmp may be partial — just discard it.
             char tmp[KV_MAX_FILENAME_LEN]; snprintf(tmp, sizeof(tmp), "%s_compact.tmp", base_prefix);
-            fs->remove(tmp);
+            fs.remove(tmp);
         }
 
-        fs->remove(name);  // clear journal
+        fs.remove(name);  // clear journal
     }
 
     /* -------- FINALIZE COMPACTION -------- */
@@ -881,42 +867,42 @@ printf("[ufskv] Rotating segment...\n");
         // Remove all existing segments, then rename tmp → seg0.
         for (uint32_t i = 0; i < UFSKV_MAX_SEGMENTS; i++) {
             char sname[KV_MAX_FILENAME_LEN]; segment_name(i, sname);
-            fs->remove(sname);
+            fs.remove(sname);
         }
-        if (fs->rename(tmp_name, seg0) != 0) {
-            fs->remove(tmp_name);
+        if (fs.rename(tmp_name, seg0) != 0) {
+            fs.remove(tmp_name);
             return;
         }
 
         // Rebuild in-memory index by scanning seg0.
         index.clear();
-        FileHandle f = fs->open(seg0, "rb");
-        if (f.ctx) {
+        File f = fs.open(seg0, File::ModeRead);
+        if (f) {
             uint32_t scan_offset = 0;
             uint8_t key_buf[KV_MAX_KEY_LEN];
             while (true) {
                 RecordHeader hdr;
-                if (fs->read(f, &hdr, sizeof(hdr)) != sizeof(hdr)) break;
+                if (f.read(&hdr, sizeof(hdr)) != sizeof(hdr)) break;
                 if (hdr.magic != MAGIC_RECORD || hdr.key_len == 0 ||
                     hdr.key_len > KV_MAX_KEY_LEN || hdr.length > UFSKV_MAX_VALUE) break;
-                if (fs->read(f, key_buf, hdr.key_len) != hdr.key_len) break;
-                fs->seek(f, (long)(scan_offset + sizeof(hdr) + hdr.key_len + hdr.length), 0);
+                if (f.read(key_buf, hdr.key_len) != hdr.key_len) break;
+                f.seek((long)(scan_offset + sizeof(hdr) + hdr.key_len + hdr.length), SeekModeSet);
                 RecordCommit c;
-                if (fs->read(f, &c, sizeof(c)) != sizeof(c)) break;
+                if (f.read(&c, sizeof(c)) != sizeof(c)) break;
                 if (c.magic != MAGIC_COMMIT) break;
                 if (!(hdr.flags & FLAG_DELETE))
                     index_insert(key_buf, hdr.key_len, 0, scan_offset, hdr.timestamp);
                 scan_offset += sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
             }
-            fs->close(f);
+            f.close();
         }
 
         // Rebuild persistent index from the now-correct in-memory index.
         // Use write_index_bulk() — single flush for all entries — not persist_index_entry()
         // which flushes after every entry and would cause N × fsync delays on flash.
         char iname[KV_MAX_FILENAME_LEN]; index_name(iname);
-        if (index_file.ctx) { fs->close(index_file); index_file.ctx = nullptr; }
-        fs->remove(iname);
+        if (index_file) { index_file.close(); }
+        fs.remove(iname);
         write_index_bulk();
         open_index_for_append();
 
@@ -928,15 +914,15 @@ printf("[ufskv] Rotating segment...\n");
 
     bool compact()
     {
-printf("[ufskv] Compacting storage...\n");
+printf("[mstore] Compacting storage...\n");
 
         // --- Phase 1: write COMPACTING journal ---
         write_journal(JOURNAL_COMPACTING);
 
         char tmp_name[KV_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
-printf("[ufskv] Opening tmp file: %s\n", tmp_name);
-        FileHandle outf = fs->open(tmp_name, "wb");
-        if (!outf.ctx) { clear_journal(); return false; }
+printf("[mstore] Opening tmp file: %s\n", tmp_name);
+        File outf = fs.open(tmp_name, File::ModeWrite);
+        if (!outf) { clear_journal(); return false; }
 
         // --- Phase 2: build per-segment sorted lists of live offsets ---
         struct LiveRec { uint32_t offset; std::vector<uint8_t> key; };
@@ -955,48 +941,49 @@ printf("[ufskv] Opening tmp file: %s\n", tmp_name);
         }
 
         // --- Phase 3: one open/close per segment, read live records in offset order ---
+        // Static to avoid placing 1 KB on the stack — compact() is not re-entrant.
         uint8_t key_buf[KV_MAX_KEY_LEN];
-        uint8_t val_buf[UFSKV_MAX_VALUE];
+        static uint8_t val_buf[UFSKV_MAX_VALUE];
         bool write_ok = true;
 
         for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS && write_ok; s++) {
             if (per_seg[s].empty()) continue;
 
             char src_name[KV_MAX_FILENAME_LEN]; segment_name(s, src_name);
-printf("[ufskv] Opening src file: %s\n", src_name);
-            FileHandle src = fs->open(src_name, "rb");
-            if (!src.ctx) continue;
+printf("[mstore] Opening src file: %s\n", src_name);
+            File src = fs.open(src_name, File::ModeRead);
+            if (!src) continue;
 
             for (size_t i = 0; i < per_seg[s].size(); i++) {
                 LiveRec& lr = per_seg[s][i];
-                fs->seek(src, (long)lr.offset, 0);
+                src.seek((long)lr.offset, SeekModeSet);
                 RecordHeader hdr;
-                if (fs->read(src, &hdr, sizeof(hdr)) != sizeof(hdr)) continue;
+                if (src.read(&hdr, sizeof(hdr)) != sizeof(hdr)) continue;
                 if (hdr.magic != MAGIC_RECORD || hdr.key_len > KV_MAX_KEY_LEN ||
                     hdr.length > UFSKV_MAX_VALUE) continue;
-                if (fs->read(src, key_buf, hdr.key_len) != hdr.key_len) continue;
-                if (hdr.length > 0 && fs->read(src, val_buf, hdr.length) != hdr.length) continue;
+                if (src.read(key_buf, hdr.key_len) != hdr.key_len) continue;
+                if (hdr.length > 0 && src.read(val_buf, hdr.length) != hdr.length) continue;
                 RecordCommit c; c.magic = MAGIC_COMMIT;
                 uint32_t expected = sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
                 size_t written = 0;
-                written += fs->write(outf, &hdr,    sizeof(hdr));
-                written += fs->write(outf, key_buf, hdr.key_len);
-                if (hdr.length > 0) written += fs->write(outf, val_buf, hdr.length);
-                written += fs->write(outf, &c,      sizeof(c));
+                written += outf.write(&hdr,    sizeof(hdr));
+                written += outf.write(key_buf, hdr.key_len);
+                if (hdr.length > 0) written += outf.write(val_buf, hdr.length);
+                written += outf.write(&c, sizeof(c));
                 if (written != expected) { write_ok = false; break; }
             }
 
-printf("[ufskv] Closing src file: %s\n", src_name);
-            fs->close(src);
+printf("[mstore] Closing src file: %s\n", src_name);
+            src.close();
         }
 
-        fs->flush(outf);
-printf("[ufskv] Closing tmp file: %s\n", tmp_name);
-        fs->close(outf);
+        outf.flush();
+printf("[mstore] Closing tmp file: %s\n", tmp_name);
+        outf.close();
 
         if (!write_ok) {
-            printf("[ufskv] Compact aborted: storage full, segments preserved\n");
-            fs->remove(tmp_name);
+            printf("[mstore] Compact aborted: storage full, segments preserved\n");
+            fs.remove(tmp_name);
             clear_journal();   // journal is still COMPACTING — safe to discard
             return false;
         }
@@ -1013,12 +1000,12 @@ printf("[ufskv] Closing tmp file: %s\n", tmp_name);
 
 private:
 
-    FileSystemInterface* fs;
+    FileSystem fs;
 
     char base_prefix[32];
 
-    FileHandle active_file;
-    FileHandle index_file;
+    File active_file;
+    File index_file;
 
     uint32_t current_segment=0;
     uint32_t current_offset=0;
