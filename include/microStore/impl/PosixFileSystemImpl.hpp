@@ -1,0 +1,308 @@
+#pragma once
+
+#if defined(MICROSTORE_USE_POSIXFS)
+
+#include "../File.hpp"
+#include "../FileSystem.hpp"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <fcntl.h>
+
+namespace microStoreImpl {
+
+class PosixFileSystemImpl : public microStore::FileSystemImpl {
+
+protected:
+
+	class FileImpl : public microStore::FileImpl {
+
+	private:
+		int _fd = -1;
+		bool _closed = false;
+		size_t _available = 0;
+		char _filename[1024];
+
+	public:
+		FileImpl(int fd) : microStore::FileImpl(), _fd(fd) { _available = size(); }
+		virtual ~FileImpl() { if (!_closed) close(); }
+
+	public:
+		inline virtual const char* name() const {
+			assert(_fd != -1);
+#if 0
+			char proclnk[1024];
+			snprintf(proclnk, sizeof(proclnk), "/proc/self/fd/%d", fileno(_file));
+			int r = ::readlink(proclnk, _filename, sizeof(_filename));
+			if (r < 0) {
+				return nullptr);
+			}
+			_filename[r] = '\0';
+			return _filename;
+#elif 0
+			if (::fcntl(fd, F_GETPATH, _filename) < 0) {
+				rerturn nullptr;
+			}
+			return _filename;
+#else
+			return nullptr;
+#endif
+		}
+
+		inline virtual size_t size() const {
+			assert(_fd != -1);
+			struct stat st;
+			::fstat(_fd, &st);
+			return st.st_size;
+		}
+
+		inline virtual void close() {
+			assert(_fd != -1);
+			::close(_fd);
+			_closed = true;
+			_fd = -1;
+		}
+
+		inline virtual int read() {
+			if (_available <= 0) {
+				return EOF;
+			}
+			assert(_fd != -1);
+			uint8_t ch;
+			int status = ::read(_fd, &ch, 1);
+			if (status < 1) {
+				return EOF;
+			}
+			--_available;
+			return ch;
+		}
+		inline virtual size_t write(uint8_t ch) {
+			assert(_fd != -1);
+			ssize_t status = ::write(_fd, &ch, 1);
+			if (status < 1) {
+				return status;
+			}
+			++_available;
+			return 1;
+		}
+		inline virtual size_t read(uint8_t* buffer, size_t size) {
+			assert(_fd != -1);
+		    ssize_t read = ::read(_fd, buffer, size);
+			if (read < 0) {
+				return 0;
+			}
+			_available -= read;
+			return (size_t)read;
+		}
+		inline virtual size_t write(const uint8_t* buffer, size_t size) {
+			assert(_fd != -1);
+		    ssize_t wrote = ::write(_fd, buffer, size);
+			if (wrote < 0) {
+				return 0;
+			}
+			_available += wrote;
+			return (size_t)wrote;
+		}
+
+		inline virtual int available() {
+#if 0
+			assert(_fd != -1);
+			int size = 0;
+			::ioctl(::fileno(_file), FIONREAD, &size);
+			return size;
+#else
+			return _available;
+#endif
+		}
+		inline virtual int peek() {
+			if (_available <= 0) {
+				return EOF;
+			}
+			assert(_fd != -1);
+			uint8_t ch;
+			int status = ::read(_fd, &ch, 1);
+			if (status < 1) {
+				return EOF;
+			}
+			::lseek(_fd, -1, SEEK_CUR);
+			return ch;
+		}
+		inline virtual size_t tell() {
+			assert(_fd != -1);
+		    return ::lseek(_fd, 0, SEEK_CUR);
+		}
+		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
+			assert(_fd != -1);
+			int whence;
+			switch (mode) {
+				case microStore::SeekMode::SeekModeCur:
+					whence = SEEK_CUR;
+					break;
+				case microStore::SeekMode::SeekModeEnd:
+					whence = SEEK_END;
+					break;
+				case microStore::SeekMode::SeekModeSet:
+				default:
+					whence = SEEK_SET;
+					break;
+			}
+		    return ::lseek(_fd, pos, whence);
+		}
+		inline virtual void flush() {
+			assert(_fd != -1);
+			::fsync(_fd);
+		}
+
+		inline virtual bool isValid() const { if (_fd == -1) return false; return !_closed; }
+
+	};
+
+public:
+	PosixFileSystemImpl() {}
+
+public:
+
+	virtual bool init() override {
+		return true;
+	}
+
+	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+	    int flags;
+		switch (mode) {
+			case microStore::File::ModeRead:
+				flags = O_RDONLY;
+				break;
+			case microStore::File::ModeWrite:
+				flags = O_WRONLY|O_CREAT|O_TRUNC;
+				break;
+			case microStore::File::ModeAppend:
+				flags = O_WRONLY|O_CREAT|O_APPEND;
+				break;
+			case microStore::File::ModeReadWrite:
+				flags = O_RDWR|O_CREAT|O_TRUNC;
+				break;
+			case microStore::File::ModeReadAppend:
+				flags = O_RDWR|O_CREAT|O_APPEND;
+				break;
+			default:
+				//flags = O_RDWR|O_CREAT;
+				return {};
+		}
+		int fd = ::open(path, flags, 0644);
+		if (fd == -1) {
+			return {};
+		}
+		return microStore::File(new FileImpl(fd));
+	}
+
+
+	virtual bool exists(const char* path) override {
+		int fd = ::open(path, O_RDONLY);
+		if (fd != -1) {
+			::close(fd);
+			return true;
+		}
+		return false;
+	}
+
+	virtual bool remove(const char* path) override {
+		return (::unlink(path) == 0);
+	}
+
+	virtual bool rename(const char* from_path, const char* to_path) override {
+		return (::rename(from_path, to_path) == 0);
+	}
+
+	virtual bool isDirectory(const char* path) override {
+		struct stat st = {0};
+		return (::stat(path, &st) == 0);
+	}
+
+	virtual bool mkdir(const char* path) override {
+		struct stat st = {0};
+		if (::stat(path, &st) == 0) {
+			return true;
+		}
+		return (::mkdir(path, 0700) == 0);
+	}
+
+	virtual bool rmdir(const char* path) override {
+		if (::rmdir(path) == 0) {
+			return false;
+		}
+		return true;
+	}
+
+
+/*
+	virtual size_t readFile(const char* path, RNS::Bytes& data) {
+		size_t read = 0;
+		FILE* file = ::fopen(path, "r");
+		if (file != nullptr) {
+			::fseek(file, 0, SEEK_END);
+			size_t size = ::ftell(file);
+			::rewind(file);
+			//size_t read = ::fread(data.writable(size), size, 1, file);
+			read = ::fread(data.writable(size), 1, size, file);
+			if (read != size) {
+				data.clear();
+			}
+			// Native
+			::fclose(file);
+		}
+		return read;
+	}
+
+	virtual size_t writeFile(const char* path, const RNS::Bytes& data) {
+		// CBA TODO Replace remove with working truncation
+		::remove(path);
+		size_t wrote = 0;
+		// Native
+		FILE* file = ::fopen(path, "w");
+		if (file != nullptr) {
+			//size_t wrote = ::fwrite(data.data(), data.size(), 1, file);
+			wrote = ::fwrite(data.data(), 1, data.size(), file);
+			::fclose(file);
+		}
+		return wrote;
+	}
+*/
+
+	virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
+		std::list<std::string> files;
+		DIR *dir = ::opendir(path);
+		if (dir == NULL) {
+			return files;
+		}
+		struct dirent *entry;
+		while ((entry = ::readdir(dir)) != NULL) {
+			if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+				continue;
+			}
+			char* name = entry->d_name;
+			if (callback) callback(name);
+			else files.push_back(name);
+		}
+		::closedir(dir);
+		return files;
+	}
+
+
+	virtual size_t storageSize() override {
+		return 0;
+	}
+
+	virtual size_t storageAvailable() override {
+		return 0;
+	}
+
+};
+
+}
+
+#endif
