@@ -41,12 +41,13 @@ The design still follows the log-structured KV architecture used by systems such
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
-#if defined(PLATFORM_NATIVE)
+#if defined(ARDUINO)
+#include <Arduino.h>
+#else
 #include <chrono>
 #endif
 
-namespace microStore
-{
+namespace microStore {
 
 /* ---------------- CONFIG ---------------- */
 
@@ -69,6 +70,10 @@ namespace microStore
 
 #ifndef KV_MAX_KEY_LEN
 #define KV_MAX_KEY_LEN 64
+#endif
+
+#ifndef KV_MAX_FILENAME_LEN
+#define KV_MAX_FILENAME_LEN 64
 #endif
 
 #ifndef UFSKV_COMPACT_RETRY_MS
@@ -167,11 +172,11 @@ static uint32_t crc32(uint32_t crc,const uint8_t* data,size_t len)
 
 /* ---------------- STORAGE ENGINE ---------------- */
 
-class Storage
+class Store
 {
 public:
 
-    Storage()
+    Store()
     {
         write_buf_pos = 0;
         active_file.ctx = nullptr;
@@ -195,7 +200,7 @@ public:
         uint32_t resume_seg = 0;
         for (uint32_t i = 0; i < UFSKV_MAX_SEGMENTS; i++)
         {
-            char name[64];
+            char name[KV_MAX_FILENAME_LEN];
             segment_name(i, name);
             FileHandle f = fs->open(name, "rb");
             if (f.ctx) { fs->close(f); resume_seg = i; }
@@ -208,7 +213,7 @@ public:
 
     void clear()
     {
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
 
         if(index_file.ctx) { fs->close(index_file); index_file.ctx = nullptr; }
 
@@ -298,7 +303,7 @@ public:
         IndexValue* e=index_find(key, key_len);
         if(!e) return false;
 
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
         segment_name(e->segment,name);
 
         FileHandle f=fs->open(name,"rb");
@@ -402,7 +407,7 @@ public:
 
             for(uint32_t seg = 0; seg < UFSKV_MAX_SEGMENTS; seg++)
         {
-            char name[64];
+            char name[KV_MAX_FILENAME_LEN];
             segment_name(seg, name);
 
             FileHandle f = fs->open(name, "rb");
@@ -559,11 +564,11 @@ public:
         bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
 
     private:
-        friend class Storage;
+        friend class Store;
 
         using idx_iter = std::unordered_map<std::vector<uint8_t>, IndexValue, VectorHash>::iterator;
 
-        iterator(Storage* store, idx_iter pos, idx_iter end)
+        iterator(Store* store, idx_iter pos, idx_iter end)
             : store_(store), pos_(pos), end_(end)
         {
             load();
@@ -575,7 +580,7 @@ public:
             current_.key       = pos_->first;
             current_.timestamp = iv.timestamp;
 
-            char name[64];
+            char name[KV_MAX_FILENAME_LEN];
             store_->segment_name(iv.segment, name);
 
             FileHandle f = store_->fs->open(name, "rb");
@@ -591,7 +596,7 @@ public:
             store_->fs->close(f);
         }
 
-        Storage*  store_;
+        Store*  store_;
         idx_iter  pos_;
         idx_iter  end_;
         Entry     current_;
@@ -678,7 +683,7 @@ private:
 
     bool write_index_bulk()
     {
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
         index_name(name);
 
         FileHandle f = fs->open(name, "ab");
@@ -705,7 +710,7 @@ private:
 
     bool load_index()
     {
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
         index_name(name);
 
         FileHandle f=fs->open(name,"rb");
@@ -742,7 +747,7 @@ private:
 
     void open_index_for_append()
     {
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
         index_name(name);
         index_file = fs->open(name, "ab");
     }
@@ -751,17 +756,17 @@ private:
 
     void segment_name(uint32_t id,char* out)
     {
-        sprintf(out,"%s_%u.dat",base_prefix,id);
+        snprintf(out, KV_MAX_FILENAME_LEN, "%s_%u.dat", base_prefix,id);
     }
 
     void index_name(char* out)
     {
-        sprintf(out,"%s_index.dat",base_prefix);
+        snprintf(out, KV_MAX_FILENAME_LEN, "%s_index.dat", base_prefix);
     }
 
     void journal_name(char* out)
     {
-        sprintf(out, "%s_journal.dat", base_prefix);
+        snprintf(out, KV_MAX_FILENAME_LEN, "%s_journal.dat", base_prefix);
     }
 
     void open_segment(uint32_t id)
@@ -771,7 +776,7 @@ private:
             active_file.ctx = nullptr;
         }
 
-        char name[64];
+        char name[KV_MAX_FILENAME_LEN];
         segment_name(id,name);
 
 printf("[ufskv] Opening active file: %s\n", name);
@@ -824,7 +829,7 @@ printf("[ufskv] Rotating segment...\n");
 
     void write_journal(uint32_t state)
     {
-        char name[64]; journal_name(name);
+        char name[KV_MAX_FILENAME_LEN]; journal_name(name);
         FileHandle f = fs->open(name, "wb");
         if (!f.ctx) return;
         Journal j; j.magic = JOURNAL_MAGIC; j.state = state;
@@ -835,13 +840,13 @@ printf("[ufskv] Rotating segment...\n");
 
     void clear_journal()
     {
-        char name[64]; journal_name(name);
+        char name[KV_MAX_FILENAME_LEN]; journal_name(name);
         fs->remove(name);
     }
 
     void recover_if_needed()
     {
-        char name[64]; journal_name(name);
+        char name[KV_MAX_FILENAME_LEN]; journal_name(name);
         FileHandle f = fs->open(name, "rb");
         if (!f.ctx) return;
 
@@ -859,7 +864,7 @@ printf("[ufskv] Rotating segment...\n");
             finalize_compaction();
         } else {
             // COMPACTING: tmp may be partial — just discard it.
-            char tmp[64]; snprintf(tmp, sizeof(tmp), "%s_compact.tmp", base_prefix);
+            char tmp[KV_MAX_FILENAME_LEN]; snprintf(tmp, sizeof(tmp), "%s_compact.tmp", base_prefix);
             fs->remove(tmp);
         }
 
@@ -870,12 +875,12 @@ printf("[ufskv] Rotating segment...\n");
 
     void finalize_compaction()
     {
-        char tmp_name[64]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
-        char seg0[64];     segment_name(0, seg0);
+        char tmp_name[KV_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
+        char seg0[KV_MAX_FILENAME_LEN];     segment_name(0, seg0);
 
         // Remove all existing segments, then rename tmp → seg0.
         for (uint32_t i = 0; i < UFSKV_MAX_SEGMENTS; i++) {
-            char sname[64]; segment_name(i, sname);
+            char sname[KV_MAX_FILENAME_LEN]; segment_name(i, sname);
             fs->remove(sname);
         }
         if (fs->rename(tmp_name, seg0) != 0) {
@@ -909,7 +914,7 @@ printf("[ufskv] Rotating segment...\n");
         // Rebuild persistent index from the now-correct in-memory index.
         // Use write_index_bulk() — single flush for all entries — not persist_index_entry()
         // which flushes after every entry and would cause N × fsync delays on flash.
-        char iname[64]; index_name(iname);
+        char iname[KV_MAX_FILENAME_LEN]; index_name(iname);
         if (index_file.ctx) { fs->close(index_file); index_file.ctx = nullptr; }
         fs->remove(iname);
         write_index_bulk();
@@ -928,7 +933,7 @@ printf("[ufskv] Compacting storage...\n");
         // --- Phase 1: write COMPACTING journal ---
         write_journal(JOURNAL_COMPACTING);
 
-        char tmp_name[64]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
+        char tmp_name[KV_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
 printf("[ufskv] Opening tmp file: %s\n", tmp_name);
         FileHandle outf = fs->open(tmp_name, "wb");
         if (!outf.ctx) { clear_journal(); return false; }
@@ -957,7 +962,7 @@ printf("[ufskv] Opening tmp file: %s\n", tmp_name);
         for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS && write_ok; s++) {
             if (per_seg[s].empty()) continue;
 
-            char src_name[64]; segment_name(s, src_name);
+            char src_name[KV_MAX_FILENAME_LEN]; segment_name(s, src_name);
 printf("[ufskv] Opening src file: %s\n", src_name);
             FileHandle src = fs->open(src_name, "rb");
             if (!src.ctx) continue;
