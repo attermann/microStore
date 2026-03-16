@@ -1,15 +1,38 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_LITTLEFS)
+#if defined(MICROSTORE_USE_FLASHFS)
 
-#include "../File.hpp"
-#include "../FileSystem.hpp"
+#include "../File.h"
+#include "../FileSystem.h"
 
-#include <LittleFS.h>
+#include <Cached_SPIFlash.h>
+#include <FlashFileSystem.h>
+#define FS FlashFS
+using namespace Adafruit_LittleFS;
 
 namespace microStoreImpl {
 
-class LittleFSFileSystemImpl : public microStore::FileSystemImpl {
+Adafruit_FlashTransport_SPI g_flashTransport(SS, SPI);
+
+//Flash definition structure for GD25Q16C Flash (RAK15001)
+Cached_SPIFlash g_flash(&g_flashTransport);
+SPIFlash_Device_t g_RAK15001 {
+	.total_size = (1UL << 21),
+	.start_up_time_us = 5000,
+	.manufacturer_id = 0xc8,
+	.memory_type = 0x40,
+	.capacity = 0x15,
+	.max_clock_speed_mhz = 15,
+	.quad_enable_bit_mask = 0x00,
+	.has_sector_protection = false,
+	.supports_fast_read = true,
+	.supports_qspi = false,
+	.supports_qspi_writes = false,
+	.write_status_register_split = false,
+	.single_status_byte = true,
+};
+
+class FlashFSFileSystemImpl : public microStore::FileSystemImpl {
 
 protected:
 
@@ -31,23 +54,23 @@ protected:
 		inline virtual int read() { return _file->read(); }
 		inline virtual size_t write(uint8_t ch) { return _file->write(ch); }
 		inline virtual size_t read(uint8_t* buffer, size_t size) { return _file->read((uint8_t*)buffer, size); }
-		inline virtual size_t write(const uint8_t* buffer, size_t size) { return _file->write((uint8_t*)buffer, size); }
+		inline virtual size_t write(const uint8_t* buffer, size_t size) { return _file->write(buffer, size); }
 
 		inline virtual int available() { return _file->available(); }
 		inline virtual int peek() { return _file->peek(); }
 		inline virtual size_t tell() { return _file->position(); }
 		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
-			fs::SeekMode smode;
+			uint8_t smode;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
-					smode = fs::SeekMode::SeekCur;
+					smode = SEEK_O_CUR;
 					break;
 				case microStore::SeekMode::SeekModeEnd:
-					smode = fs::SeekMode::SeekEnd;
+					smode = SEEK_O_END;
 					break;
 				case microStore::SeekMode::SeekModeSet:
 				default:
-					smode = fs::SeekMode::SeekSet;
+					smode = SEEK_O_SET;
 					break;
 			}
 			return _file->seek(pos, smode);
@@ -59,12 +82,12 @@ protected:
 	};
 
 public:
-	LittleFSFileSystemImpl() {}
+	FlashFSFileSystemImpl() {}
 
 public:
 
 	bool format() {
-		if (!LittleFS.format()) {
+		if (!FlashFS.format()) {
 			return false;
 		}
 		return true;
@@ -72,8 +95,11 @@ public:
 
 
 	virtual bool init() override {
-		// Initialize LittleFS
-		if (!LittleFS.begin(true, "")) {
+		// Initialize FlashFileSystem
+		if (!g_flash.begin(&g_RAK15001)) {
+			return false;
+		}
+		if (!FlashFS.begin(&g_flash)) {
 			return false;
 		}
 /*
@@ -91,56 +117,58 @@ public:
 
 
 	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
-		const char* pmode;
-		switch (mode) {
-			case microStore::File::ModeRead:
-				pmode = FILE_READ;
-				break;
-			case microStore::File::ModeWrite:
-				pmode = FILE_WRITE;
-				break;
-			case microStore::File::ModeAppend:
-				pmode = FILE_APPEND;
-				break;
-			case microStore::File::ModeReadWrite:
-				pmode = "w+";
-				break;
-			case microStore::File::ModeReadAppend:
-				pmode = "a+";
-				break;
-			default:
-				return {};
+		int pmode;
+		if (mode == microStore::File::ModeRead) {
+			pmode = FILE_O_READ;
 		}
-		// CBA Using copy constructor to obtain File*
-		File* file = new File(LittleFS.open(path, pmode));
-		if (file == nullptr || !(*file)) {
+		else if (mode == microStore::File::ModeWrite) {
+			pmode = FILE_O_WRITE;
+			// CBA TODO Replace remove with working truncation
+			if (FlashFS.exists(path)) {
+				FlashFS.remove(path);
+			}
+		}
+		else if (mode == microStore::File::ModeAppend) {
+			// CBA This is the default write mode for nrf52 littlefs
+			pmode = FILE_O_WRITE;
+		}
+		else {
 			return {};
 		}
+		File* file = new File(FS);
+		if (!file->open(path, pmode)) {
+			return {};
+		}
+		// Seek to beginning to overwrite (this is failing on nrf52)
+		//if (mode == microStore::File::ModeWrite) {
+		//	file->seek(0);
+		//	file->truncate(0);
+		//}
 		return microStore::File(new FileImpl(file));
 	}
 
 
 	virtual bool exists(const char* path) override {
-		return LittleFS.exists(path);
+		return FlashFS.exists(path);
 	}
 
 	virtual bool remove(const char* path) override {
-		return LittleFS.remove(path);
+		return FlashFS.remove(path);
 	}
 
 	virtual bool rename(const char* from_path, const char* to_path) override {
-		return LittleFS.rename(from_path, to_path);
+		return FlashFS.rename(from_path, to_path);
 	}
 
 	virtual bool mkdir(const char* path) override {
-		if (!LittleFS.mkdir(path)) {
+		if (!FlashFS.mkdir(path)) {
 			return false;
 		}
 		return true;
 	}
 
 	virtual bool rmdir(const char* path) override {
-		if (!LittleFS.rmdir(path)) {
+		if (!FlashFS.rmdir_r(path)) {
 			return false;
 		}
 		return true;
@@ -150,14 +178,13 @@ public:
 /*
 	virtual size_t readFile(const char* path, RNS::Bytes& data) override {
 		size_t read = 0;
-		File file = LittleFS.open(path, FILE_READ);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_READ)) {
 			size_t size = file.size();
 			read = file.readBytes((char*)data.writable(size), size);
 			if (read != size) {
 				data.resize(read);
 			}
-			//TRACE("read_file: closing input file");
 			file.close();
 		}
 		return read;
@@ -165,12 +192,12 @@ public:
 
 	virtual size_t writeFile(const char* path, const RNS::Bytes& data) override {
 		// CBA TODO Replace remove with working truncation
-		if (LittleFS.exists(path)) {
-			LittleFS.remove(path);
+		if (FlashFS.exists(path)) {
+			FlashFS.remove(path);
 		}
 		size_t wrote = 0;
-		File file = LittleFS.open(path, FILE_WRITE);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_WRITE)) {
 			// Seek to beginning to overwrite
 			//file.seek(0);
 			//file.truncate(0);
@@ -182,8 +209,8 @@ public:
 */
 
 	virtual bool isDirectory(const char* path) override {
-		File file = LittleFS.open(path, FILE_READ);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_READ)) {
 			bool is_directory = file.isDirectory();
 			file.close();
 			return is_directory;
@@ -193,7 +220,7 @@ public:
 
 	virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 		std::list<std::string> files;
-		File root = LittleFS.open(path);
+		File root = FlashFS.open(path);
 		if (!root) {
 			return files;
 		}
@@ -213,11 +240,11 @@ public:
 	}
 
 	virtual size_t storageSize() override {
-		return LittleFS.totalBytes();
+		return FlashFS.totalBytes();
 	}
 
 	virtual size_t storageAvailable() override {
-		return (LittleFS.totalBytes() - LittleFS.usedBytes());
+		return (FlashFS.totalBytes() - FlashFS.usedBytes());
 	}
 
 };

@@ -4,7 +4,7 @@
  */
 
 #include <unity.h>
-#include <microStore/Store.hpp>
+#include <microStore/Store.h>
 
 #include <cstring>
 #include <cstdio>

@@ -1,16 +1,17 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_SPIFFS)
+#if defined(MICROSTORE_USE_INTERNALFS)
 
-#include "../File.hpp"
-#include "../FileSystem.hpp"
+#include "../File.h"
+#include "../FileSystem.h"
 
-#include <SPIFFS.h>
-#define FS SPIFFS
+#include <InternalFileSystem.h>
+#define FS InternalFS
+using namespace Adafruit_LittleFS_Namespace;
 
 namespace microStoreImpl {
 
-class SPIFFSFileSystemImpl : public microStore::FileSystemImpl {
+class InternalFSFileSystemImpl : public microStore::FileSystemImpl {
 
 protected:
 
@@ -38,17 +39,17 @@ protected:
 		inline virtual int peek() { return _file->peek(); }
 		inline virtual size_t tell() { return _file->position(); }
 		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
-			fs::SeekMode smode;
+			uint8_t smode;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
-					smode = fs::SeekMode::SeekCur;
+					smode = SEEK_O_CUR;
 					break;
 				case microStore::SeekMode::SeekModeEnd:
-					smode = fs::SeekMode::SeekEnd;
+					smode = SEEK_O_END;
 					break;
 				case microStore::SeekMode::SeekModeSet:
 				default:
-					smode = fs::SeekMode::SeekSet;
+					smode = SEEK_O_SET;
 					break;
 			}
 			return _file->seek(pos, smode);
@@ -60,7 +61,7 @@ protected:
 	};
 
 public:
-	SPIFFSFileSystemImpl() {}
+	InternalFSFileSystemImpl() {}
 
 public:
 
@@ -73,8 +74,8 @@ public:
 
 
 	virtual bool init() override {
-		// Initialize SPIFFS
-		if (!SPIFFS.begin(true, "")) {
+		// Initialize InternalFileSystem
+		if (!InternalFS.begin()) {
 			return false;
 		}
 /*
@@ -92,24 +93,33 @@ public:
 
 
 	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
-		const char* pmode;
+		int pmode;
 		if (mode == microStore::File::ModeRead) {
-			pmode = FILE_READ;
+			pmode = FILE_O_READ;
 		}
 		else if (mode == microStore::File::ModeWrite) {
-			pmode = FILE_WRITE;
+			pmode = FILE_O_WRITE;
+			// CBA TODO Replace remove with working truncation
+			if (FS.exists(path)) {
+				FS.remove(path);
+			}
 		}
 		else if (mode == microStore::File::ModeAppend) {
-			pmode = FILE_APPEND;
+			// CBA This is the default write mode for nrf52 littlefs
+			pmode = FILE_O_WRITE;
 		}
 		else {
 			return {};
 		}
-		// CBA Using copy constructor to obtain File*
-		File* file = new File(FS.open(path, pmode));
-		if (file == nullptr || !(*file)) {
+		File* file = new File(FS);
+		if (!file->open(path, pmode)) {
 			return {};
 		}
+		// Seek to beginning to overwrite (this is failing on nrf52)
+		//if (mode == microStore::File::ModeWrite) {
+		//	file->seek(0);
+		//	file->truncate(0);
+		//}
 		return microStore::File(new FileImpl(file));
 	}
 
@@ -134,7 +144,7 @@ public:
 	}
 
 	virtual bool rmdir(const char* path) override {
-		if (!FS.rmdir(path)) {
+		if (!FS.rmdir_r(path)) {
 			return false;
 		}
 		return true;
@@ -144,8 +154,8 @@ public:
 /*
 	virtual size_t readFile(const char* path, RNS::Bytes& data) override {
 		size_t read = 0;
-		File file = FS.open(path, FILE_READ);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_READ)) {
 			size_t size = file.size();
 			read = file.readBytes((char*)data.writable(size), size);
 			if (read != size) {
@@ -162,12 +172,13 @@ public:
 			FS.remove(path);
 		}
 		size_t wrote = 0;
-		File file = FS.open(path, FILE_WRITE);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_WRITE)) {
 			// Seek to beginning to overwrite
 			//file.seek(0);
 			//file.truncate(0);
 			wrote = file.write(data.data(), data.size());
+			//TRACE("write_file: closing output file");
 			file.close();
 		}
 		return wrote;
@@ -175,8 +186,8 @@ public:
 */
 
 	virtual bool isDirectory(const char* path) override {
-		File file = FS.open(path, FILE_READ);
-		if (file) {
+		File file(FS);
+		if (file.open(path, FILE_O_READ)) {
 			bool is_directory = file.isDirectory();
 			file.close();
 			return is_directory;
@@ -205,12 +216,38 @@ public:
 		return files;
 	}
 
-	virtual size_t storageSize() override {
-		return SPIFFS.totalBytes();
+
+	static int _countLfsBlock(void *p, lfs_block_t block){
+		lfs_size_t *size = (lfs_size_t*) p;
+		*size += 1;
+		return 0;
+	}
+
+	static lfs_ssize_t getUsedBlockCount() {
+		lfs_size_t size = 0;
+		lfs_traverse(InternalFS._getFS(), _countLfsBlock, &size);
+		return size;
+	}
+
+	static int totalBytes() {
+		const lfs_config* config = InternalFS._getFS()->cfg;
+		return config->block_size * config->block_count;
+	}
+
+	static int usedBytes() {
+		const lfs_config* config = InternalFS._getFS()->cfg;
+		const int usedBlockCount = getUsedBlockCount();
+		return config->block_size * usedBlockCount;
+	}
+
+	virtual size_t storageSize()  override{
+		//return totalBytes();
+		return totalBytes();
 	}
 
 	virtual size_t storageAvailable() override {
-		return (SPIFFS.totalBytes() - SPIFFS.usedBytes());
+		//return (totalBytes() - usedBytes());
+		return (totalBytes() - usedBytes());
 	}
 
 };

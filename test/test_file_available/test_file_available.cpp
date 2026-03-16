@@ -1,6 +1,6 @@
 #include <unity.h>
-#include <microStore/FileSystem.hpp>
-#include <microStore/impl/PosixFileSystemImpl.hpp>
+#include <microStore/FileSystem.h>
+#include <microStore/impl/PosixFileSystemImpl.h>
 
 #include <stdio.h>
 #include <string.h>

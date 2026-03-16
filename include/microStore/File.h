@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Crc.hpp"
+#include "Crc.h"
 
 #ifdef ARDUINO
 //#include <Stream.h>

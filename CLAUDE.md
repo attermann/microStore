@@ -38,15 +38,15 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 | File | Purpose |
 |------|---------|
-| `include/microStore/Store.hpp` | KV store engine — the main library logic |
-| `include/microStore/FileSystem.hpp` | OOP filesystem abstraction (`FileSystem` / `FileSystemImpl`) |
-| `include/microStore/File.hpp` | OOP file abstraction (`File` / `FileImpl`) with integrated CRC-32 |
-| `include/microStore/Crc.hpp` | CRC-32 utility |
+| `include/microStore/Store.h` | KV store engine — the main library logic |
+| `include/microStore/FileSystem.h` | OOP filesystem abstraction (`FileSystem` / `FileSystemImpl`) |
+| `include/microStore/File.h` | OOP file abstraction (`File` / `FileImpl`) with integrated CRC-32 |
+| `include/microStore/Crc.h` | CRC-32 utility |
 | `include/microStore/impl/` | Platform-specific `FileSystemImpl` backends |
 
 ### Filesystem Abstraction
 
-`Store.hpp` uses `FileSystem` and `File` directly (the OOP layer from `FileSystem.hpp` / `File.hpp`). `FileSystem` wraps a `shared_ptr<FileSystemImpl>`; `Store::init()` takes a `FileSystem` by value. Platform backends implement `FileSystemImpl` and are selected by build flag:
+`Store.h` uses `FileSystem` and `File` directly (the OOP layer from `FileSystem.h` / `File.h`). `FileSystem` wraps a `shared_ptr<FileSystemImpl>`; `Store::init()` takes a `FileSystem` by value. Platform backends implement `FileSystemImpl` and are selected by build flag:
 
 | Build Flag | Backend | Platform |
 |-----------|---------|---------|
@@ -63,7 +63,7 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 - `PLATFORM_NATIVE`: uses `std::chrono` for timestamps
 - `PLATFORM_ESP32` / `PLATFORM_NRF52`: uses Arduino's `millis()`
 
-### Configuration Macros (top of Store.hpp)
+### Configuration Macros (top of Store.h)
 
 | Macro | Default | Meaning |
 |-------|---------|---------|
@@ -76,7 +76,7 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 ### Public API (`microStore::Store`)
 
-Include as `#include <microStore/Store.hpp>`. The library is header-only; `src/` is intentionally empty (`srcFilter: [-<*>]` in `library.json`).
+Include as `#include <microStore/Store.h>`. The library is header-only; `src/` is intentionally empty (`srcFilter: [-<*>]` in `library.json`).
 
 - `init(FileSystem fs, const char* prefix)` — initialize with a `FileSystem` instance and file name prefix
 - `put(key, ts, data, len)` — write key-value (overloads for `uint8_t*`, `char*`, `std::vector`)

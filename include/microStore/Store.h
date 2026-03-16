@@ -1,7 +1,7 @@
 #pragma once
 
 /*
-microStore.hpp
+microStore.h
 Advanced single-header KV store for embedded filesystems.
 
 Features
@@ -34,8 +34,8 @@ The design still follows the log-structured KV architecture used by systems such
 
 */
 
-#include "File.hpp"
-#include "FileSystem.hpp"
+#include "File.h"
+#include "FileSystem.h"
 
 #include <stdint.h>
 #include <stddef.h>
