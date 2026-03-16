@@ -87,7 +87,7 @@ protected:
 			if (status < 1) {
 				return status;
 			}
-			++_available;
+			_available = (_available > 0) ? _available - 1 : 0;
 			return 1;
 		}
 		inline virtual size_t read(uint8_t* buffer, size_t size) {
@@ -105,7 +105,7 @@ protected:
 			if (wrote < 0) {
 				return 0;
 			}
-			_available += wrote;
+			_available = ((size_t)wrote <= _available) ? _available - (size_t)wrote : 0;
 			return (size_t)wrote;
 		}
 
@@ -151,7 +151,12 @@ protected:
 					whence = SEEK_SET;
 					break;
 			}
-		    return ::lseek(_fd, pos, whence);
+			long new_pos = ::lseek(_fd, pos, whence);
+			if (new_pos >= 0) {
+				size_t file_size = size();
+				_available = ((size_t)new_pos <= file_size) ? file_size - (size_t)new_pos : 0;
+			}
+			return new_pos;
 		}
 		inline virtual void flush() {
 			assert(_fd != -1);

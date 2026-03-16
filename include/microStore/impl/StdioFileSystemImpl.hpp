@@ -84,7 +84,7 @@ protected:
 			if (::fputc(ch, _file) == EOF) {
 				return 0;
 			}
-			++_available;
+			_available = (_available > 0) ? _available - 1 : 0;
 			return 1;
 		}
 		inline virtual size_t read(uint8_t* buffer, size_t size) {
@@ -96,7 +96,7 @@ protected:
 		inline virtual size_t write(const uint8_t* buffer, size_t size) {
 			assert(_file != nullptr);
 			size_t wrote = ::fwrite(buffer, sizeof(uint8_t), size, _file);
-			_available += wrote;
+			_available = (wrote <= _available) ? _available - wrote : 0;
 			return wrote;
 		}
 
@@ -138,7 +138,14 @@ protected:
 					whence = SEEK_SET;
 					break;
 			}
-			return ::fseek(_file, pos, whence);
+			long result = ::fseek(_file, pos, whence);
+			if (result == 0) {
+				long new_pos = ::ftell(_file);
+				size_t file_size = size();
+				_available = (new_pos >= 0 && (size_t)new_pos <= file_size)
+				             ? file_size - (size_t)new_pos : 0;
+			}
+			return result;
 		}
 		inline virtual void flush() {
 			assert(_file != nullptr);
