@@ -1,26 +1,34 @@
 #include "microStore/Store.h"
+#include "microStore/File.h"
 #include "microStore/FileSystem.h"
+#include "microStore/Codec.h"
+#include "microStore/Table.h"
 
-#if defined(MICROSTORE_USE_POSIXFS)
+#if defined(USTORE_USE_POSIXFS)
 #include "microStore/impl/PosixFileSystemImpl.h"
 #endif
-#if defined(MICROSTORE_USE_STDIOFS)
+#if defined(USTORE_USE_STDIOFS)
 #include "microStore/impl/StdioFileSystemImpl.h"
 #endif
-#if defined(MICROSTORE_USE_LITTLEFS)
+#if defined(USTORE_USE_LITTLEFS)
 #include "microStore/impl/LittleFSFileSystemImpl.h"
 #endif
-#if defined(MICROSTORE_USE_SPIFFS)
+#if defined(USTORE_USE_SPIFFS)
 #include "microStore/impl/SPIFFSFileSystemImpl.h"
 #endif
-#if defined(MICROSTORE_USE_INTERNALFS)
+#if defined(USTORE_USE_INTERNALFS)
 #include "microStore/impl/InternalFSFileSystemImpl.h"
 #endif
-#if defined(MICROSTORE_USE_FLASHFS)
+#if defined(USTORE_USE_FLASHFS)
 #include "microStore/impl/FlashFSFileSystemImpl.h"
 #endif
 
 int main(void) {
+
+	//microStore::FileSystem filesystem(new microStoreImpl::PosixFileSystemImpl());
+    //microStore::Store store;
+    //store.init(filesystem, "ms_kvstore");
+
 }
 
 void setup() {

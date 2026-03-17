@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_LITTLEFS)
+#if defined(USTORE_USE_LITTLEFS)
 
 #include "../File.h"
 #include "../FileSystem.h"

@@ -1,8 +1,8 @@
 #pragma once
 
 /*
-microStore.h
-Advanced single-header KV store for embedded filesystems.
+Store.h
+Advanced header-only KV store for embedded filesystems.
 
 Features
 --------
@@ -15,7 +15,7 @@ Features
 - automatic compaction
 - filesystem agnostic
 
-Below is a single-header C++ implementation called microStore that incorporates the previous design plus the two additional improvements:
+Below is a header-only C++ implementation called microStore that incorporates the previous design plus the two additional improvements:
 
 New capabilities added
 	1.	Persistent hash index file → near-instant boot (no full log scan)
@@ -48,14 +48,15 @@ The design still follows the log-structured KV architecture used by systems such
 #include <Arduino.h>
 #else
 #include <chrono>
+#include <sys/time.h>
 #endif
 
 namespace microStore {
 
 /* ---------------- CONFIG ---------------- */
 
-#ifndef UFSKV_MAX_VALUE
-#define UFSKV_MAX_VALUE 1024
+#ifndef USTORE_MAX_VALUE_LEN
+#define USTORE_MAX_VALUE_LEN 1024
 #endif
 
 #ifndef UFSKV_SEGMENT_SIZE
@@ -71,8 +72,8 @@ namespace microStore {
 #define UFSKV_WRITE_BUFFER 4096
 #endif
 
-#ifndef KV_MAX_KEY_LEN
-#define KV_MAX_KEY_LEN 64
+#ifndef USTORE_MAX_KEY_LEN
+#define USTORE_MAX_KEY_LEN 64
 #endif
 
 #ifndef KV_MAX_FILENAME_LEN
@@ -99,22 +100,38 @@ struct Journal { uint32_t magic; uint32_t state; };
 
 /* ---------------- TIME HELPER ---------------- */
 
-#if defined(PLATFORM_NATIVE)
-static inline uint32_t ufskv_millis()
+#ifdef ARDUINO
+// millis() is a reliable Arduino built-in on both ESP32 and nRF52840.
+// std::chrono::steady_clock is intentionally avoided: the Adafruit nRF52
+// Arduino core lacks the _gettimeofday_r backend and causes linker errors.
+static inline uint32_t ustore_millis()
+{
+    return (uint32_t)millis();
+}
+// return current time in seconds since startup
+inline static uint32_t ustore_time() {
+    // handle roll-over of 32-bit millis (approx. 49 days)
+    static uint32_t low32, high32;
+    uint32_t new_low32 = millis();
+    if (new_low32 < low32) high32++;
+    low32 = new_low32;
+    return (uint32_t)(((uint64_t)high32 << 32 | low32)/1000);
+}
+#else
+static inline uint32_t ustore_millis()
 {
     using namespace std::chrono;
     return (uint32_t)duration_cast<milliseconds>(
         steady_clock::now().time_since_epoch()).count();
 }
-#else
-// millis() is a reliable Arduino built-in on both ESP32 and nRF52840.
-// std::chrono::steady_clock is intentionally avoided: the Adafruit nRF52
-// Arduino core lacks the _gettimeofday_r backend and causes linker errors.
-static inline uint32_t ufskv_millis()
-{
-    return (uint32_t)millis();
+// return current time in seconds since 00:00:00, January 1, 1970 (Unix Epoch)
+inline static uint32_t ustore_time() {
+    timeval time;
+    ::gettimeofday(&time, NULL);
+    return (uint32_t)(((uint64_t)(time.tv_sec * 1000) + (uint64_t)(time.tv_usec / 1000))/1000);
 }
 #endif
+
 
 /* ---------------- RECORD STRUCTURES ---------------- */
 
@@ -218,9 +235,9 @@ public:
 
     /* -------- PUT -------- */
 
-    bool put(const uint8_t* key, uint8_t key_len, uint32_t ts, const void* data, uint16_t len)
+    bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ts = ustore_time())
     {
-        if(len > UFSKV_MAX_VALUE)
+        if(len > USTORE_MAX_VALUE_LEN)
             return false;
 
         // CBA Don't fail to put just because rotation fails
@@ -262,23 +279,31 @@ public:
         return true;
     }
 
-    bool put(const char* key, uint32_t ts, const void* data, uint16_t len)
+    bool put(const char* key, const void* data, uint16_t len, uint32_t ts = ustore_time())
     {
         size_t kl = strlen(key);
-        if(kl > KV_MAX_KEY_LEN) return false;
-        return put((const uint8_t*)key, (uint8_t)kl, ts, data, len);
+        if(kl > USTORE_MAX_KEY_LEN) return false;
+        return put((const uint8_t*)key, (uint8_t)kl, data, len, ts);
     }
 
-    bool put(const std::vector<uint8_t>& key, uint32_t ts, const void* data, uint16_t len)
+    bool put(const std::vector<uint8_t>& key, const void* data, uint16_t len, uint32_t ts = ustore_time())
     {
-        if(key.size() > KV_MAX_KEY_LEN) return false;
-        return put(key.data(), (uint8_t)key.size(), ts, data, len);
+        if(key.size() > USTORE_MAX_KEY_LEN) return false;
+        return put(key.data(), (uint8_t)key.size(), data, len, ts);
+    }
+
+    bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ts = ustore_time())
+    {
+        if(key.size() > USTORE_MAX_KEY_LEN) return false;
+        return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ts);
     }
 
     /* -------- GET -------- */
 
-    bool get(const uint8_t* key, uint8_t key_len, void* out, uint16_t* len)
+    bool get(const uint8_t* key, uint8_t key_len, void* out, uint16_t* size)
     {
+        if (key_len > USTORE_MAX_KEY_LEN) return false;
+
         flush_buffer();
 
         IndexValue* e=index_find(key, key_len);
@@ -293,41 +318,45 @@ public:
         f.seek(e->offset,SeekModeSet);
 
         RecordHeader hdr;
+
         if (f.read(&hdr,sizeof(hdr)) != sizeof(hdr) ||
             hdr.magic   != MAGIC_RECORD              ||
-            hdr.key_len  > KV_MAX_KEY_LEN            ||
-            hdr.length   > UFSKV_MAX_VALUE           ||
-            (out != nullptr && hdr.length > *len))
+            hdr.key_len  > USTORE_MAX_KEY_LEN            ||
+            hdr.length   > USTORE_MAX_VALUE_LEN)
         {
-printf("[mstore] Found corrupted record!\n");
+printf("[ustore] Found corrupted record!\n");
             f.close();
             return false;
         }
 
         // CBA If this is only a size request then skip reading value
         if (out != nullptr) {
-            f.seek((long)(e->offset+sizeof(hdr)+hdr.key_len),SeekModeSet);
-            f.read(out,hdr.length);
+            f.seek((long)(e->offset+sizeof(hdr)+hdr.key_len), SeekModeSet);
+            f.read(out, std::min(hdr.length, *size));
         }
 
-        *len=hdr.length;
+        *size = hdr.length;
 
         f.close();
 
         return true;
     }
 
-    bool get(const char* key, void* out, uint16_t* len)
+    bool get(const char* key, void* out, uint16_t* size)
     {
-        size_t kl = strlen(key);
-        if(kl > KV_MAX_KEY_LEN) return false;
-        return get((const uint8_t*)key, (uint8_t)kl, out, len);
+        return get((const uint8_t*)key, (uint8_t)strlen(key), out, size);
     }
 
-    bool get(const std::vector<uint8_t>& key, void* out, uint16_t* len)
+    bool get(const std::vector<uint8_t>& key, void* out, uint16_t* size)
     {
-        if(key.size() > KV_MAX_KEY_LEN) return false;
-        return get(key.data(), (uint8_t)key.size(), out, len);
+        return get(key.data(), (uint8_t)key.size(), out, size);
+    }
+
+    bool get(const std::vector<uint8_t>& key, std::vector<uint8_t>& out)
+    {
+        out.reserve(USTORE_MAX_VALUE_LEN);
+        uint16_t size = USTORE_MAX_VALUE_LEN;
+        return get(key.data(), (uint8_t)key.size(), out.data(), &size);
     }
 
     /* -------- DELETE -------- */
@@ -366,13 +395,13 @@ printf("[mstore] Found corrupted record!\n");
     bool remove(const char* key)
     {
         size_t kl = strlen(key);
-        if(kl > KV_MAX_KEY_LEN) return false;
+        if(kl > USTORE_MAX_KEY_LEN) return false;
         return remove((const uint8_t*)key, (uint8_t)kl);
     }
 
     bool remove(const std::vector<uint8_t>& key)
     {
-        if(key.size() > KV_MAX_KEY_LEN) return false;
+        if(key.size() > USTORE_MAX_KEY_LEN) return false;
         return remove(key.data(), (uint8_t)key.size());
     }
 
@@ -428,10 +457,10 @@ printf("[mstore] Found corrupted record!\n");
                     if(hdr.magic != MAGIC_RECORD)
                         break;
 
-                    if(hdr.key_len > KV_MAX_KEY_LEN)
+                    if(hdr.key_len > USTORE_MAX_KEY_LEN)
                         break;
 
-                    uint8_t key[KV_MAX_KEY_LEN];
+                    uint8_t key[USTORE_MAX_KEY_LEN];
                     if(f.read(key, hdr.key_len) != hdr.key_len)
                         break;
 
@@ -588,10 +617,10 @@ public:
             f.close();
         }
 
-        Store*  store_;
-        idx_iter  pos_;
-        idx_iter  end_;
-        Entry     current_;
+        Store* store_;
+        idx_iter pos_;
+        idx_iter end_;
+        Entry current_;
     };
 
     /* -------- BEGIN / END -------- */
@@ -711,12 +740,12 @@ private:
         while(true)
         {
             uint8_t key_len;
-            uint8_t key[KV_MAX_KEY_LEN];
+            uint8_t key[USTORE_MAX_KEY_LEN];
             uint32_t seg;
             uint32_t off;
 
             if(f.read(&key_len, 1) != 1) break;
-            if(key_len > KV_MAX_KEY_LEN) break;
+            if(key_len > USTORE_MAX_KEY_LEN) break;
             if(f.read(key, key_len) != key_len) break;
             if(f.read(&seg, 4) != 4) break;
             if(f.read(&off, 4) != 4) break;
@@ -768,7 +797,7 @@ private:
         char name[KV_MAX_FILENAME_LEN];
         segment_name(id,name);
 
-printf("[mstore] Opening active file: %s\n", name);
+printf("[ustore] Opening active file: %s\n", name);
         active_file = fs.open(name,File::ModeReadAppend);
         current_segment=id;
         active_file.seek(0,SeekModeEnd);
@@ -780,7 +809,7 @@ printf("[mstore] Opening active file: %s\n", name);
         if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < UFSKV_SEGMENT_SIZE)
             return true;
 
-printf("[mstore] Rotating segment...\n");
+printf("[ustore] Rotating segment...\n");
         flush_buffer();
 
         if (active_file) { active_file.close(); }
@@ -789,16 +818,16 @@ printf("[mstore] Rotating segment...\n");
 
         if (current_segment >= UFSKV_MAX_SEGMENTS) {
             if (compact_in_cooldown &&
-                (ufskv_millis() - compact_cooldown_start_ms) < UFSKV_COMPACT_RETRY_MS)
+                (ustore_millis() - compact_cooldown_start_ms) < UFSKV_COMPACT_RETRY_MS)
             {
-                printf("[mstore] Compact skipped: cooldown active\n");
+                printf("[ustore] Compact skipped: cooldown active\n");
                 current_segment = UFSKV_MAX_SEGMENTS - 1;
                 open_segment(current_segment);
                 return false;
             }
             if (!compact()) {
                 compact_in_cooldown       = true;
-                compact_cooldown_start_ms = ufskv_millis();
+                compact_cooldown_start_ms = ustore_millis();
                 current_segment = UFSKV_MAX_SEGMENTS - 1;
                 open_segment(current_segment);
                 return false;
@@ -879,12 +908,12 @@ printf("[mstore] Rotating segment...\n");
         File f = fs.open(seg0, File::ModeRead);
         if (f) {
             uint32_t scan_offset = 0;
-            uint8_t key_buf[KV_MAX_KEY_LEN];
+            uint8_t key_buf[USTORE_MAX_KEY_LEN];
             while (true) {
                 RecordHeader hdr;
                 if (f.read(&hdr, sizeof(hdr)) != sizeof(hdr)) break;
                 if (hdr.magic != MAGIC_RECORD || hdr.key_len == 0 ||
-                    hdr.key_len > KV_MAX_KEY_LEN || hdr.length > UFSKV_MAX_VALUE) break;
+                    hdr.key_len > USTORE_MAX_KEY_LEN || hdr.length > USTORE_MAX_VALUE_LEN) break;
                 if (f.read(key_buf, hdr.key_len) != hdr.key_len) break;
                 f.seek((long)(scan_offset + sizeof(hdr) + hdr.key_len + hdr.length), SeekModeSet);
                 RecordCommit c;
@@ -914,13 +943,13 @@ printf("[mstore] Rotating segment...\n");
 
     bool compact()
     {
-printf("[mstore] Compacting storage...\n");
+printf("[ustore] Compacting storage...\n");
 
         // --- Phase 1: write COMPACTING journal ---
         write_journal(JOURNAL_COMPACTING);
 
         char tmp_name[KV_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
-printf("[mstore] Opening tmp file: %s\n", tmp_name);
+printf("[ustore] Opening tmp file: %s\n", tmp_name);
         File outf = fs.open(tmp_name, File::ModeWrite);
         if (!outf) { clear_journal(); return false; }
 
@@ -942,15 +971,15 @@ printf("[mstore] Opening tmp file: %s\n", tmp_name);
 
         // --- Phase 3: one open/close per segment, read live records in offset order ---
         // Static to avoid placing 1 KB on the stack — compact() is not re-entrant.
-        uint8_t key_buf[KV_MAX_KEY_LEN];
-        static uint8_t val_buf[UFSKV_MAX_VALUE];
+        uint8_t key_buf[USTORE_MAX_KEY_LEN];
+        static uint8_t val_buf[USTORE_MAX_VALUE_LEN];
         bool write_ok = true;
 
         for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS && write_ok; s++) {
             if (per_seg[s].empty()) continue;
 
             char src_name[KV_MAX_FILENAME_LEN]; segment_name(s, src_name);
-printf("[mstore] Opening src file: %s\n", src_name);
+printf("[ustore] Opening src file: %s\n", src_name);
             File src = fs.open(src_name, File::ModeRead);
             if (!src) continue;
 
@@ -959,8 +988,8 @@ printf("[mstore] Opening src file: %s\n", src_name);
                 src.seek((long)lr.offset, SeekModeSet);
                 RecordHeader hdr;
                 if (src.read(&hdr, sizeof(hdr)) != sizeof(hdr)) continue;
-                if (hdr.magic != MAGIC_RECORD || hdr.key_len > KV_MAX_KEY_LEN ||
-                    hdr.length > UFSKV_MAX_VALUE) continue;
+                if (hdr.magic != MAGIC_RECORD || hdr.key_len > USTORE_MAX_KEY_LEN ||
+                    hdr.length > USTORE_MAX_VALUE_LEN) continue;
                 if (src.read(key_buf, hdr.key_len) != hdr.key_len) continue;
                 if (hdr.length > 0 && src.read(val_buf, hdr.length) != hdr.length) continue;
                 RecordCommit c; c.magic = MAGIC_COMMIT;
@@ -973,16 +1002,16 @@ printf("[mstore] Opening src file: %s\n", src_name);
                 if (written != expected) { write_ok = false; break; }
             }
 
-printf("[mstore] Closing src file: %s\n", src_name);
+printf("[ustore] Closing src file: %s\n", src_name);
             src.close();
         }
 
         outf.flush();
-printf("[mstore] Closing tmp file: %s\n", tmp_name);
+printf("[ustore] Closing tmp file: %s\n", tmp_name);
         outf.close();
 
         if (!write_ok) {
-            printf("[mstore] Compact aborted: storage full, segments preserved\n");
+            printf("[ustore] Compact aborted: storage full, segments preserved\n");
             fs.remove(tmp_name);
             clear_journal();   // journal is still COMPACTING — safe to discard
             return false;

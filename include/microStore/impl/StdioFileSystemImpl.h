@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_STDIOFS)
+#if defined(USTORE_USE_STDIOFS)
 
 #include "../File.h"
 #include "../FileSystem.h"

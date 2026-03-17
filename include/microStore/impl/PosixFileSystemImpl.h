@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_POSIXFS)
+#if defined(USTORE_USE_POSIXFS)
 
 #include "../File.h"
 #include "../FileSystem.h"

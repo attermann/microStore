@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_FLASHFS)
+#if defined(USTORE_USE_FLASHFS)
 
 #include "../File.h"
 #include "../FileSystem.h"

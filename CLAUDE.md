@@ -50,11 +50,11 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 | Build Flag | Backend | Platform |
 |-----------|---------|---------|
-| `MICROSTORE_USE_POSIXFS` | `PosixFileSystemImpl` | native (Linux/macOS) |
-| `MICROSTORE_USE_LITTLEFS` | `LittleFSFileSystemImpl` | ESP32 |
-| `MICROSTORE_USE_SPIFFS` | `SPIFFSFileSystemImpl` | ESP32 |
-| `MICROSTORE_USE_INTERNALFS` | `InternalFSFileSystemImpl` | nRF52 |
-| `MICROSTORE_USE_FLASHFS` | `FlashFSFileSystemImpl` | nRF52 + SPI flash |
+| `USTORE_USE_POSIXFS` | `PosixFileSystemImpl` | native (Linux/macOS) |
+| `USTORE_USE_LITTLEFS` | `LittleFSFileSystemImpl` | ESP32 |
+| `USTORE_USE_SPIFFS` | `SPIFFSFileSystemImpl` | ESP32 |
+| `USTORE_USE_INTERNALFS` | `InternalFSFileSystemImpl` | nRF52 |
+| `USTORE_USE_FLASHFS` | `FlashFSFileSystemImpl` | nRF52 + SPI flash |
 
 `File` accumulates a running CRC-32 on every read/write transparently; call `file.crc()` to retrieve it. To add a new platform, subclass `FileSystemImpl` and `FileImpl`.
 
@@ -67,11 +67,11 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 | Macro | Default | Meaning |
 |-------|---------|---------|
-| `UFSKV_MAX_VALUE` | 1024 | Max value size in bytes |
+| `USTORE_MAX_VALUE_LEN` | 1024 | Max value size in bytes |
 | `UFSKV_SEGMENT_SIZE` | 65536 | Per-segment file size limit |
 | `UFSKV_MAX_SEGMENTS` | 8 | Max number of segments |
 | `UFSKV_WRITE_BUFFER` | 4096 | Write buffer size |
-| `KV_MAX_KEY_LEN` | 64 | Max key length in bytes |
+| `USTORE_MAX_KEY_LEN` | 64 | Max key length in bytes |
 | `UFSKV_COMPACT_RETRY_MS` | 60000 | Compaction cooldown (ms) |
 
 ### Public API (`microStore::Store`)

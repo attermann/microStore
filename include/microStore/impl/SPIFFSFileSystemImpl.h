@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(MICROSTORE_USE_SPIFFS)
+#if defined(USTORE_USE_SPIFFS)
 
 #include "../File.h"
 #include "../FileSystem.h"
