@@ -64,13 +64,11 @@ struct Codec<std::vector<uint8_t>>
 {
 	static std::vector<uint8_t> encode(const std::vector<uint8_t>& vec)
 	{
-		// CBA Need to copy?
-		return vec;
+		return std::vector<uint8_t>(vec.begin(), vec.end());
 	}
 	static bool decode(const std::vector<uint8_t>& data, std::vector<uint8_t>& out)
 	{
-		// CBA Need to copy?
-		out = data;
+		out.assign(data.begin(), data.end());
 		return true;
 	}
 };

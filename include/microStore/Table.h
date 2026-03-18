@@ -37,29 +37,40 @@ public:
 
     Table(Backend& b):backend(b){}
 
-    bool put(const Key& key,const Value& value)
+    bool put(const Key& key, const Value& value)
     {
-        auto k=KeyCodec::encode(key);
-        auto v=ValueCodec::encode(value);
+        auto k = KeyCodec::encode(key);
+        auto v = ValueCodec::encode(value);
 
-        return backend.put(k,v);
+        return backend.put(k, v);
     }
 
-    bool get(const Key& key,Value& value)
+    bool get(const Key& key, Value& value)
     {
-        auto k=KeyCodec::encode(key);
+        auto k = KeyCodec::encode(key);
 
         std::vector<uint8_t> raw;
 
-        if(!backend.get(k, raw)) return false;
+        if (!backend.get(k, raw)) return false;
 
         return ValueCodec::decode(raw, value);
     }
 
     bool remove(const Key& key)
     {
-        auto k=KeyCodec::encode(key);
+        auto k = KeyCodec::encode(key);
         return backend.remove(k);
+    }
+
+    bool exists(const Key& key)
+    {
+        auto k = KeyCodec::encode(key);
+        return backend.exists(k);
+    }
+
+    size_t size()
+    {
+        return backend.size();
     }
 
     class iterator
@@ -69,13 +80,13 @@ public:
         iterator(typename Backend::iterator it, typename Backend::iterator end)
             : it_(std::move(it)), end_(std::move(end))
         {
-            if(it_ != end_) load();
+            if (it_ != end_) load();
         }
 
         iterator& operator++()
         {
             ++it_;
-            if(it_ != end_) load();
+            if (it_ != end_) load();
             return *this;
         }
 
