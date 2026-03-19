@@ -15,3 +15,5 @@ Advanced header-only KV store for embedded filesystems that follows the log-stru
 - journaled crash-safe compaction
 - index-based compaction walk
 - streaming iterator
+- automatic age-based eviction (TTL)
+- automatic size-based eviction (keep N most recent records)
