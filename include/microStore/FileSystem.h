@@ -3,6 +3,7 @@
 #include "File.h"
 
 #include <list>
+#include <vector>
 #include <memory>
 #include <cassert>
 #include <functional>

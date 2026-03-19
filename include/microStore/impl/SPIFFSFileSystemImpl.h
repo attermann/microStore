@@ -72,6 +72,7 @@ public:
 	}
 
 	virtual bool init() override {
+		printf("[ustore] Initializing SPIFFSFileSystem\n");
 		// Initialize SPIFFS
 		if (!SPIFFS.begin(true, "")) {
 			return false;

@@ -2,7 +2,7 @@
 
 /*
 Store.h
-Advanced header-only KV store for embedded filesystems.
+Advanced header-only KV store for embedded filesystems that follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
 
 Features
 --------
@@ -14,23 +14,10 @@ Features
 - tombstone deletes
 - automatic compaction
 - filesystem agnostic
-
-Below is a header-only C++ implementation called microStore that incorporates the previous design plus the two additional improvements:
-
-New capabilities added
-	1.	Persistent hash index file → near-instant boot (no full log scan)
-	2.	Write batching buffer → reduces filesystem write amplification
-	3.	Segmented append-only log
-	4.	Tombstone deletes
-	5.	Automatic compaction
-	6.	Robin-hood hash table
-	7.	Crash-safe commit markers
-	8.	Filesystem-agnostic backend
-    9.  Journaled crash-safe compaction
-    10. Index-based compaction walk
-    11. Streaming iterator
-
-The design still follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
+- filesystem-agnostic backend
+- journaled crash-safe compaction
+- index-based compaction walk
+- streaming iterator
 
 */
 

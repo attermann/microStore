@@ -22,6 +22,10 @@
 #if defined(USTORE_USE_FLASHFS)
 #include "microStore/impl/FlashFSFileSystemImpl.h"
 #endif
+#if defined(USTORE_USE_UNIVERSALFS)
+#include "microStore/impl/UniversalFileSystemImpl.h"
+#endif
+#include "microStore/impl/NoopFileSystemImpl.h"
 
 int main(void) {
 

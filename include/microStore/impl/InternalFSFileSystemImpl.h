@@ -73,6 +73,7 @@ public:
 	}
 
 	virtual bool init() override {
+		printf("[ustore] Initializing InternalFileSystem\n");
 		// Initialize InternalFileSystem
 		if (!InternalFS.begin()) {
 			return false;

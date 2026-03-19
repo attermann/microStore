@@ -188,6 +188,7 @@ public:
 	}
 
 	inline virtual bool init() override {
+		printf("[ustore] Initializing PosixFileSystem\n");
 #if defined(ESP32)
 		// Initialize LittleFS for POSIX file access
 		if (!LittleFS.begin(true, "")) {

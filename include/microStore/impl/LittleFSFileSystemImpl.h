@@ -63,18 +63,15 @@ public:
 
 public:
 
-	virtual bool format() override {
-		if (!LittleFS.format()) {
-			return false;
-		}
+	inline virtual bool format() override {
+		if (!LittleFS.format()) return false;
 		return true;
 	}
 
-	virtual bool init() override {
+	inline virtual bool init() override {
+		printf("[ustore] Initializing LittleFSFileSystem\n");
 		// Initialize LittleFS
-		if (!LittleFS.begin(true, "")) {
-			return false;
-		}
+		if (!LittleFS.begin(true, "")) return false;
 /*
 		// Ensure filesystem is writable and reformat if not
 		if (writeFile("/test", "test", 4) < 4) {
@@ -118,29 +115,25 @@ public:
 	}
 
 
-	virtual bool exists(const char* path) override {
+	inline virtual bool exists(const char* path) override {
 		return LittleFS.exists(path);
 	}
 
-	virtual bool remove(const char* path) override {
+	inline virtual bool remove(const char* path) override {
 		return LittleFS.remove(path);
 	}
 
-	virtual bool rename(const char* from_path, const char* to_path) override {
+	inline virtual bool rename(const char* from_path, const char* to_path) override {
 		return LittleFS.rename(from_path, to_path);
 	}
 
-	virtual bool mkdir(const char* path) override {
-		if (!LittleFS.mkdir(path)) {
-			return false;
-		}
+	inline virtual bool mkdir(const char* path) override {
+		if (!LittleFS.mkdir(path)) return false;
 		return true;
 	}
 
-	virtual bool rmdir(const char* path) override {
-		if (!LittleFS.rmdir(path)) {
-			return false;
-		}
+	inline virtual bool rmdir(const char* path) override {
+		if (!LittleFS.rmdir(path)) return false;
 		return true;
 	}
 
@@ -176,11 +169,11 @@ public:
 		return files;
 	}
 
-	virtual size_t storageSize() override {
+	inline virtual size_t storageSize() override {
 		return LittleFS.totalBytes();
 	}
 
-	virtual size_t storageAvailable() override {
+	inline virtual size_t storageAvailable() override {
 		return (LittleFS.totalBytes() - LittleFS.usedBytes());
 	}
 

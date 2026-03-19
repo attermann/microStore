@@ -94,6 +94,7 @@ public:
 	}
 
 	virtual bool init() override {
+		printf("[ustore] Initializing FlashFileSystem\n");
 		// Initialize FlashFileSystem
 		if (!g_flash.begin(&g_RAK15001)) {
 			return false;
