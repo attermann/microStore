@@ -23,6 +23,7 @@ public:
 	virtual ~FileSystemImpl() {}
 
 protected:
+	virtual bool format() { return false; }
 	virtual bool init() { return true; }
 	virtual void loop() {}
 
@@ -37,8 +38,13 @@ protected:
 	virtual bool rmdir(const char* path) = 0;
 
 	// Helper
-	//virtual size_t readFile(const char* path, Bytes& data) = 0;
-	//virtual size_t writeFile(const char* path, const Bytes& data) = 0;
+	inline virtual size_t size(const char* path) {
+		File file = open(path, File::ModeRead);
+		if (!file) return false;
+		size_t size = file.size();
+		file.close();
+		return size;
+	}
 	virtual bool isDirectory(const char* path) = 0;
 	virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) = 0;
 	virtual size_t storageSize() = 0;
@@ -69,6 +75,7 @@ public:
 	inline void clear() { _impl.reset(); }
 
 public:
+	inline bool format() { assert(_impl); return _impl->format(); }
 	inline bool init() { assert(_impl); return _impl->init(); }
 	inline void loop() { assert(_impl); _impl->loop(); }
 
@@ -84,24 +91,50 @@ public:
 	inline bool rmdir(const char* path) { assert(_impl); return _impl->rmdir(path); }
 
 	// Helper
-	//inline size_t readFile(const char* path, Bytes& data) { assert(_impl); return _impl->readFile(path, data); }
-	//inline size_t writeFile(const char* path, const Bytes& data) { assert(_impl); return _impl->writeFile(path, data); }
+	inline size_t size(const char* path) { assert(_impl); return _impl->size(path); }
 	inline bool isDirectory(const char* path) { assert(_impl); return _impl->isDirectory(path); }
 	inline std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) { assert(_impl); return _impl->listDirectory(path, callback); }
 	inline size_t storageSize() { assert(_impl); return _impl->storageSize(); }
 	inline size_t storageAvailable() { assert(_impl); return _impl->storageAvailable(); }
 
-	//NEW File open(const char *path, const char *mode = FILE_READ, const bool create = false);
-	//NEW bool exists(const char *path);
-	//NEW bool remove(const char *path);
-	//NEW bool rename(const char *pathFrom, const char *pathTo);
-	//NEW bool mkdir(const char *path);
-	//NEW bool rmdir(const char *path);
+	virtual size_t readFile(const char* path, uint8_t* buffer, size_t size) {
+		File file = open(path, microStore::File::ModeRead);
+		if (!file) return 0;
+		size_t read = file.read(buffer, size);
+		file.close();
+		return read;
+	}
+	virtual size_t readFile(const char* path, std::vector<uint8_t>& data) {
+		File file = open(path, microStore::File::ModeRead);
+		if (!file) return 0;
+		size_t size = file.size();
+		data.resize(size);
+		size_t read = file.read(data.data(), size);
+		file.close();
+		data.resize(read);
+		return read;
+	}
+	virtual size_t writeFile(const char* path, const uint8_t* buffer, size_t len) {
+		// CBA Consider whether remove is necessary/desired (is truncate broken on some platforms?)
+		remove(path);
+		File file = open(path, microStore::File::ModeWrite);
+		if (!file) return 0;
+		size_t wrote = file.write(buffer, len);
+		file.close();
+		return wrote;
+	}
+	virtual size_t writeFile(const char* path, const std::vector<uint8_t>& data) {
+		// CBA Consider whether remove is necessary/desired (is truncate broken on some platforms?)
+		remove(path);
+		File file = open(path, microStore::File::ModeWrite);
+		if (!file) return 0;
+		size_t wrote = file.write(data.data(), data.size());
+		file.close();
+		return wrote;
+	}
 
 private:
 	std::list<std::string> _empty;
-
-	// getters/setters
 protected:
 public:
 

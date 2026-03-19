@@ -3,9 +3,9 @@
 #include "Crc.h"
 
 #ifdef ARDUINO
-//#include <Stream.h>
+#include <Stream.h>
 #else
-//#include "Utilities/Stream.h"
+#include "Stream.h"
 #endif
 
 #include <list>
@@ -14,12 +14,6 @@
 #include <stdint.h>
 
 namespace microStore {
-
-// forward declaration of nested enum
-//class File {
-//public:
-//    enum SeekMode : int;
-//};
 
 enum SeekMode {
 	SeekModeSet,
@@ -58,8 +52,7 @@ protected:
 friend class File;
 };
 
-//class File : public Stream {
-class File {
+class File : public Stream {
 
 public:
 	enum Mode {

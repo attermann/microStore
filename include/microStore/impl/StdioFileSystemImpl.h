@@ -5,6 +5,10 @@
 #include "../File.h"
 #include "../FileSystem.h"
 
+#if defined(ESP32)
+#include <LittleFS.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -161,7 +165,33 @@ public:
 
 public:
 
-	virtual bool init() override {
+	virtual bool format() override {
+#if defined(ESP32)
+		if (!LittleFS.format()) {
+			return false;
+		}
+		return true;
+#else
+		return false;
+#endif
+	}
+
+	inline virtual bool init() override {
+#if defined(ESP32)
+		// Initialize LittleFS for POSIX file access
+		if (!LittleFS.begin(true, "")) {
+			return false;
+		}
+#endif
+/*
+		// Ensure filesystem is writable and reformat if not
+		if (writeFile("/test", "test", 4) < 4) {
+			format();
+		}
+		else {
+			remove("/test");
+		}
+*/
 		return true;
 	}
 
@@ -194,7 +224,7 @@ public:
 	}
 
 
-	virtual bool exists(const char* path) override {
+	inline virtual bool exists(const char* path) override {
 		FILE* file = ::fopen(path, "r");
 		if (file != nullptr) {
 			::fclose(file);
@@ -203,20 +233,20 @@ public:
 		return false;
 	}
 
-	virtual bool remove(const char* path) override {
+	inline virtual bool remove(const char* path) override {
 		return (::remove(path) == 0);
 	}
 
-	virtual bool rename(const char* from_path, const char* to_path) override {
+	inline virtual bool rename(const char* from_path, const char* to_path) override {
 		return (::rename(from_path, to_path) == 0);
 	}
 
-	virtual bool isDirectory(const char* path) override {
+	inline virtual bool isDirectory(const char* path) override {
 		struct stat st = {0};
 		return (::stat(path, &st) == 0);
 	}
 
-	virtual bool mkdir(const char* path) override {
+	inline virtual bool mkdir(const char* path) override {
 		struct stat st = {0};
 		if (::stat(path, &st) == 0) {
 			return true;
@@ -224,47 +254,13 @@ public:
 		return (::mkdir(path, 0700) == 0);
 	}
 
-	virtual bool rmdir(const char* path) override {
+	inline virtual bool rmdir(const char* path) override {
 		if (::rmdir(path) == 0) {
 			return false;
 		}
 		return true;
 	}
 
-
-/*
-	virtual size_t readFile(const char* path, RNS::Bytes& data) {
-		size_t read = 0;
-		FILE* file = ::fopen(path, "r");
-		if (file != nullptr) {
-			::fseek(file, 0, SEEK_END);
-			size_t size = ::ftell(file);
-			::rewind(file);
-			//size_t read = ::fread(data.writable(size), size, 1, file);
-			read = ::fread(data.writable(size), 1, size, file);
-			if (read != size) {
-				data.clear();
-			}
-			// Native
-			::fclose(file);
-		}
-		return read;
-	}
-
-	virtual size_t writeFile(const char* path, const RNS::Bytes& data) {
-		// CBA TODO Replace remove with working truncation
-		::remove(path);
-		size_t wrote = 0;
-		// Native
-		FILE* file = ::fopen(path, "w");
-		if (file != nullptr) {
-			//size_t wrote = ::fwrite(data.data(), data.size(), 1, file);
-			wrote = ::fwrite(data.data(), 1, data.size(), file);
-			::fclose(file);
-		}
-		return wrote;
-	}
-*/
 
 	virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 		std::list<std::string> files;
@@ -286,12 +282,20 @@ public:
 	}
 
 
-	virtual size_t storageSize() override {
+	inline virtual size_t storageSize() override {
+#if defined(ESP32)
+		return LittleFS.totalBytes();
+#else
 		return 0;
+#endif
 	}
 
-	virtual size_t storageAvailable() override {
+	inline virtual size_t storageAvailable() override {
+#if defined(ESP32)
+		return (LittleFS.totalBytes() - LittleFS.usedBytes());
+#else
 		return 0;
+#endif
 	}
 
 };

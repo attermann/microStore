@@ -181,7 +181,7 @@ public:
 		write_buf_pos = 0;
 	}
 
-	bool init(FileSystem filesystem,const char* prefix)
+	bool init(FileSystem& filesystem, const char* prefix)
 	{
 		fs = filesystem;
 		strncpy(base_prefix,prefix,sizeof(base_prefix));

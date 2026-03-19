@@ -64,13 +64,12 @@ public:
 
 public:
 
-	bool format() {
+	virtual bool format() override {
 		if (!FS.format()) {
 			return false;
 		}
 		return true;
 	}
-
 
 	virtual bool init() override {
 		// Initialize SPIFFS
@@ -79,8 +78,7 @@ public:
 		}
 /*
 		// Ensure filesystem is writable and reformat if not
-		RNS::Bytes test("test");
-		if (writeFile("/test", test) < 4) {
+		if (writeFile("/test", "test", 4) < 4) {
 			format();
 		}
 		else {
@@ -140,39 +138,6 @@ public:
 		return true;
 	}
 
-
-/*
-	virtual size_t readFile(const char* path, RNS::Bytes& data) override {
-		size_t read = 0;
-		File file = FS.open(path, FILE_READ);
-		if (file) {
-			size_t size = file.size();
-			read = file.readBytes((char*)data.writable(size), size);
-			if (read != size) {
-				data.resize(read);
-			}
-			file.close();
-		}
-		return read;
-	}
-
-	virtual size_t writeFile(const char* path, const RNS::Bytes& data) override {
-		// CBA TODO Replace remove with working truncation
-		if (FS.exists(path)) {
-			FS.remove(path);
-		}
-		size_t wrote = 0;
-		File file = FS.open(path, FILE_WRITE);
-		if (file) {
-			// Seek to beginning to overwrite
-			//file.seek(0);
-			//file.truncate(0);
-			wrote = file.write(data.data(), data.size());
-			file.close();
-		}
-		return wrote;
-	}
-*/
 
 	virtual bool isDirectory(const char* path) override {
 		File file = FS.open(path, FILE_READ);
