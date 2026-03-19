@@ -1,3 +1,17 @@
+/*
+ * Copyright (c) 2026 Chad Attermann
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ */
+
 #pragma once
 
 #include <vector>
@@ -7,19 +21,13 @@
 namespace microStore {
 
 template<typename T>
+struct always_false : std::false_type {};
+
+template<typename T>
 struct Codec
 {
-	static std::vector<uint8_t> encode(const T& v)
-	{
-		const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&v);
-		return std::vector<uint8_t>(ptr, ptr + sizeof(T));
-	}
-	static bool decode(const std::vector<uint8_t>& data, T& out)
-	{
-		if(data.size() != sizeof(T)) return false;
-		memcpy(&out, data.data(), sizeof(T));
-		return true;
-	}
+	static_assert(always_false<T>::value,
+		"No Codec<T> specialization for this type — provide one.");
 };
 
 template<>

@@ -1,30 +1,24 @@
-#pragma once
-
 /*
-KV Table Project — Feature Summary
+ * Copyright (c) 2026 Chad Attermann
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ */
 
-Purpose: A generic, type-safe key-value table abstraction for embedded systems
-with swappable storage backends at compile time.
-
-Core Abstraction
-- Table<K, V, Backend, KeyCodec, ValueCodec> — central template that composes storage + serialization
-- Backends implement: put, get, erase, and iterator over raw byte pairs
-- Codecs implement: encode(T) → vector<uint8_t> and decode(vector<uint8_t>) → T
-- Codec<T> — generic raw memcpy + std::string specialization              
-
-Notable Design Choices
-- No formal test framework — main.cpp acts as a manual integration test
-- Flash write granularity is handled per-platform (nRF52 requires 32-byte alignment)
-- microStore external dependency bridges POSIX file calls to embedded filesystems (LittleFS)
-- Keys stored as hex-encoded filenames on POSIX (e.g., "nodeA" → kvstore/6e6f646541)                                                           
-                                                        
-*/
+#pragma once
 
 #include <vector>
 
 namespace microStore {
 
-template<typename Key,typename Value,typename Backend, typename KeyCodec,typename ValueCodec>
+template<typename Key, typename Value, typename Backend, typename KeyCodec = Codec<Key>, typename ValueCodec = Codec<Value>>
 class Table
 {
 public:
