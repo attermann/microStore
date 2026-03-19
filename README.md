@@ -1,8 +1,8 @@
+# microStore
 
-## microStore: Advanced header-only KV store for embedded filesystems that follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
+Advanced header-only KV store for embedded filesystems that follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
 
-Features
---------
+## Features
 - append-only segmented log
 - robin-hood hash index
 - persistent index file (fast boot)
