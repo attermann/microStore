@@ -17,3 +17,4 @@ Advanced header-only KV store for embedded filesystems that follows the log-stru
 - streaming iterator
 - automatic age-based eviction (TTL)
 - automatic size-based eviction (keep N most recent records)
+- support for custom memory allocator

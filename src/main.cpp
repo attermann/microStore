@@ -48,6 +48,8 @@ int main(void) {
     //store.init(filesystem, "ms_kvstore");
 
 	microStore::FileSystem filesystem{microStore::Adapters::UniversalFileSystem()};
+	microStore::Store store;
+	microStore::Table<std::string, std::vector<uint8_t>, microStore::Store> table(store);
 
 	return 0;
 }

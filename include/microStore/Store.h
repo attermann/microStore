@@ -136,7 +136,7 @@ struct RecordCommit
 
 /* ---------------- CRC ---------------- */
 
-static uint32_t crc32(uint32_t crc,const uint8_t* data,size_t len)
+inline static uint32_t crc32(uint32_t crc,const uint8_t* data,size_t len)
 {
 	crc = ~crc;
 
@@ -152,14 +152,18 @@ static uint32_t crc32(uint32_t crc,const uint8_t* data,size_t len)
 
 /* ---------------- STORAGE ENGINE ---------------- */
 
-class Store
+template<typename Allocator = std::allocator<uint8_t>>
+class BasicStore
 {
 public:
 
-	Store()
-	{
-		write_buf_pos = 0;
-	}
+	using allocator_type = Allocator;
+
+	BasicStore() : BasicStore(Allocator{}) {}
+	explicit BasicStore(const Allocator& alloc)
+		: alloc_(alloc), index(map_alloc_type(alloc_)) { write_buf_pos = 0; }
+
+	allocator_type get_allocator() const { return alloc_; }
 
 	bool init(FileSystem& filesystem, const char* prefix)
 	{
@@ -553,7 +557,8 @@ private:
 	/* -------- INDEX TYPES (hoisted so iterator can reference them) -------- */
 
 	struct VectorHash {
-		size_t operator()(const std::vector<uint8_t>& v) const {
+		template<typename Alloc>
+		size_t operator()(const std::vector<uint8_t, Alloc>& v) const {
 			uint32_t h = 2166136261u;
 			for(uint8_t b : v) { h ^= b; h *= 16777619u; }
 			return h;
@@ -565,6 +570,20 @@ private:
 		uint32_t offset;
 		uint32_t timestamp;
 	};
+
+	template<typename T>
+	using rebind_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
+
+	using byte_alloc_type = rebind_alloc<uint8_t>;
+	using KeyType         = std::vector<uint8_t, byte_alloc_type>;
+	using MapPairType     = std::pair<const KeyType, IndexValue>;
+	using map_alloc_type  = rebind_alloc<MapPairType>;
+	using IndexMap = std::unordered_map<
+		KeyType, IndexValue, VectorHash, std::equal_to<KeyType>, map_alloc_type>;
+
+	KeyType make_key(const uint8_t* key, uint8_t key_len) const {
+		return KeyType(key, key + key_len, byte_alloc_type(alloc_));
+	}
 
 public:
 
@@ -612,11 +631,11 @@ public:
 		bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
 
 	private:
-		friend class Store;
+		friend class BasicStore<Allocator>;
 
-		using idx_iter = std::unordered_map<std::vector<uint8_t>, IndexValue, VectorHash>::iterator;
+		using idx_iter = typename IndexMap::iterator;
 
-		iterator(Store* store, idx_iter pos, idx_iter end)
+		iterator(BasicStore* store, idx_iter pos, idx_iter end)
 			: store_(store), pos_(pos), end_(end)
 		{
 			load();
@@ -644,7 +663,7 @@ public:
 			f.close();
 		}
 
-		Store* store_;
+		BasicStore* store_;
 		idx_iter pos_;
 		idx_iter end_;
 		Entry current_;
@@ -696,13 +715,13 @@ private:
 
 	IndexValue* index_find(const uint8_t* key, uint8_t key_len)
 	{
-		auto it = index.find(std::vector<uint8_t>(key, key + key_len));
+		auto it = index.find(make_key(key, key_len));
 		return (it != index.end()) ? &it->second : nullptr;
 	}
 
 	void index_insert(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
 	{
-		IndexValue& iv = index[std::vector<uint8_t>(key, key + key_len)];
+		IndexValue& iv = index[make_key(key, key_len)];
 		iv.segment   = seg;
 		iv.offset    = off;
 		iv.timestamp = ts;
@@ -710,7 +729,7 @@ private:
 
 	void index_remove(const uint8_t* key, uint8_t key_len)
 	{
-		index.erase(std::vector<uint8_t>(key, key + key_len));
+		index.erase(make_key(key, key_len));
 	}
 
 	/* -------- INDEX FILE -------- */
@@ -998,8 +1017,11 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 		if (!outf) { clear_journal(); return false; }
 
 		// --- Phase 2: build per-segment sorted lists of live offsets ---
-		struct LiveRec { uint32_t offset; std::vector<uint8_t> key; };
-		std::vector<LiveRec> per_seg[UFSKV_MAX_SEGMENTS];
+		struct LiveRec { uint32_t offset; KeyType key; };
+		using LiveRecVec = std::vector<LiveRec, rebind_alloc<LiveRec>>;
+		rebind_alloc<LiveRec> lr_alloc(alloc_);
+		LiveRecVec per_seg[UFSKV_MAX_SEGMENTS];
+		for (auto& v : per_seg) { v = LiveRecVec(lr_alloc); }
 
 		for (auto& kv : index) {
 			uint32_t seg = kv.second.segment;
@@ -1092,7 +1114,11 @@ private:
 	uint8_t write_buf[UFSKV_WRITE_BUFFER];
 	size_t write_buf_pos;
 
-	std::unordered_map<std::vector<uint8_t>, IndexValue, VectorHash> index;
+	Allocator alloc_;
+	IndexMap index;
 };
+
+
+using Store = BasicStore<>;
 
 }
