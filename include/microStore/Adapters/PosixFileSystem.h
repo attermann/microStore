@@ -18,9 +18,18 @@
 #include <dirent.h>
 #include <fcntl.h>
 
-namespace microStoreImpl {
+namespace microStore { namespace Adapters {
 
-class PosixFileSystemImpl : public microStore::FileSystemImpl {
+class PosixFileSystem : public microStore::FileSystem {
+
+public:
+	PosixFileSystem() : microStore::FileSystem(new FileSystemImpl()) {}
+    virtual ~PosixFileSystem() {}
+
+    // Disable heap allocation
+    void* operator new(std::size_t) = delete;
+    void* operator new[](std::size_t) = delete;
+    void* operator new(std::size_t, void*) = delete;
 
 protected:
 
@@ -171,156 +180,161 @@ protected:
 
 	};
 
-public:
-	PosixFileSystemImpl() {}
+	class FileSystemImpl : public microStore::FileSystemImpl {
 
-public:
+	public:
+		FileSystemImpl() {}
+	    virtual ~FileSystemImpl() {}
 
-	virtual bool format() override {
+	public:
+
+		virtual bool format() override {
 #if defined(ESP32)
-		if (!LittleFS.format()) {
-			return false;
-		}
-		return true;
+			if (!LittleFS.format()) {
+				return false;
+			}
+			return true;
 #else
-		return false;
+			return false;
 #endif
-	}
+		}
 
-	inline virtual bool init() override {
-		printf("[ustore] Initializing PosixFileSystem\n");
+		inline virtual bool init() override {
+			printf("[ustore] Initializing PosixFileSystem\n");
 #if defined(ESP32)
-		// Initialize LittleFS for POSIX file access
-		if (!LittleFS.begin(true, "")) {
-			return false;
-		}
+			// Initialize LittleFS for POSIX file access
+			if (!LittleFS.begin(true, "")) {
+				return false;
+			}
 #endif
-/*
-		// Ensure filesystem is writable and reformat if not
-		if (writeFile("/test", "test", 4) < 4) {
-			format();
+	/*
+			// Ensure filesystem is writable and reformat if not
+			if (writeFile("/test", "test", 4) < 4) {
+				format();
+			}
+			else {
+				remove("/test");
+			}
+	*/
+			return true;
 		}
-		else {
-			remove("/test");
-		}
-*/
-		return true;
-	}
 
-	virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
-	    int flags;
-		switch (mode) {
-			case microStore::File::ModeRead:
-				flags = O_RDONLY;
-				break;
-			case microStore::File::ModeWrite:
-				flags = O_WRONLY|O_CREAT|O_TRUNC;
-				break;
-			case microStore::File::ModeAppend:
-				flags = O_WRONLY|O_CREAT|O_APPEND;
-				break;
-			case microStore::File::ModeReadWrite:
-				flags = O_RDWR|O_CREAT|O_TRUNC;
-				break;
-			case microStore::File::ModeReadAppend:
-				flags = O_RDWR|O_CREAT|O_APPEND;
-				break;
-			default:
-				//flags = O_RDWR|O_CREAT;
+		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+			int flags;
+			switch (mode) {
+				case microStore::File::ModeRead:
+					flags = O_RDONLY;
+					break;
+				case microStore::File::ModeWrite:
+					flags = O_WRONLY|O_CREAT|O_TRUNC;
+					break;
+				case microStore::File::ModeAppend:
+					flags = O_WRONLY|O_CREAT|O_APPEND;
+					break;
+				case microStore::File::ModeReadWrite:
+					flags = O_RDWR|O_CREAT|O_TRUNC;
+					break;
+				case microStore::File::ModeReadAppend:
+					flags = O_RDWR|O_CREAT|O_APPEND;
+					break;
+				default:
+					//flags = O_RDWR|O_CREAT;
+					return {};
+			}
+			int fd = ::open(path, flags, 0644);
+			if (fd == -1) {
 				return {};
+			}
+			return microStore::File(new FileImpl(fd));
 		}
-		int fd = ::open(path, flags, 0644);
-		if (fd == -1) {
-			return {};
-		}
-		return microStore::File(new FileImpl(fd));
-	}
 
 
-	inline virtual bool exists(const char* path) override {
-		int fd = ::open(path, O_RDONLY);
-		if (fd != -1) {
-			::close(fd);
-			return true;
-		}
-		return false;
-	}
-
-	inline virtual bool remove(const char* path) override {
-		return (::unlink(path) == 0);
-	}
-
-	inline virtual bool rename(const char* from_path, const char* to_path) override {
-		return (::rename(from_path, to_path) == 0);
-	}
-
-	inline virtual bool mkdir(const char* path) override {
-		struct stat st = {0};
-		if (::stat(path, &st) == 0) {
-			return true;
-		}
-		return (::mkdir(path, 0700) == 0);
-	}
-
-	inline virtual bool rmdir(const char* path) override {
-		if (::rmdir(path) == 0) {
+		inline virtual bool exists(const char* path) override {
+			int fd = ::open(path, O_RDONLY);
+			if (fd != -1) {
+				::close(fd);
+				return true;
+			}
 			return false;
 		}
-		return true;
-	}
 
-
-	inline virtual size_t size(const char* path) override {
-		struct stat st;
-		if (stat(path, &st) != 0) {
-			return 0;
+		inline virtual bool remove(const char* path) override {
+			return (::unlink(path) == 0);
 		}
-		return st.st_size;
-	}
 
-	inline virtual bool isDirectory(const char* path) override {
-		struct stat st = {0};
-		return (::stat(path, &st) == 0);
-	}
+		inline virtual bool rename(const char* from_path, const char* to_path) override {
+			return (::rename(from_path, to_path) == 0);
+		}
 
-	virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
-		std::list<std::string> files;
-		DIR *dir = ::opendir(path);
-		if (dir == NULL) {
+		inline virtual bool mkdir(const char* path) override {
+			struct stat st = {0};
+			if (::stat(path, &st) == 0) {
+				return true;
+			}
+			return (::mkdir(path, 0700) == 0);
+		}
+
+		inline virtual bool rmdir(const char* path) override {
+			if (::rmdir(path) == 0) {
+				return false;
+			}
+			return true;
+		}
+
+
+		inline virtual size_t size(const char* path) override {
+			struct stat st;
+			if (stat(path, &st) != 0) {
+				return 0;
+			}
+			return st.st_size;
+		}
+
+		inline virtual bool isDirectory(const char* path) override {
+			struct stat st = {0};
+			return (::stat(path, &st) == 0);
+		}
+
+		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
+			std::list<std::string> files;
+			DIR *dir = ::opendir(path);
+			if (dir == NULL) {
+				return files;
+			}
+			struct dirent *entry;
+			while ((entry = ::readdir(dir)) != NULL) {
+				if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+					continue;
+				}
+				char* name = entry->d_name;
+				if (callback) callback(name);
+				else files.push_back(name);
+			}
+			::closedir(dir);
 			return files;
 		}
-		struct dirent *entry;
-		while ((entry = ::readdir(dir)) != NULL) {
-			if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-				continue;
-			}
-			char* name = entry->d_name;
-			if (callback) callback(name);
-			else files.push_back(name);
+
+
+		inline virtual size_t storageSize() override {
+#if defined(ESP32)
+			return LittleFS.totalBytes();
+#else
+			return 0;
+#endif
 		}
-		::closedir(dir);
-		return files;
-	}
 
-
-	inline virtual size_t storageSize() override {
+		inline virtual size_t storageAvailable() override {
 #if defined(ESP32)
-		return LittleFS.totalBytes();
+			return (LittleFS.totalBytes() - LittleFS.usedBytes());
 #else
-		return 0;
+			return 0;
 #endif
-	}
+		}
 
-	inline virtual size_t storageAvailable() override {
-#if defined(ESP32)
-		return (LittleFS.totalBytes() - LittleFS.usedBytes());
-#else
-		return 0;
-#endif
-	}
+	};
 
 };
 
-}
+} }
 
 #endif
