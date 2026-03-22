@@ -168,11 +168,11 @@ public:
 	bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
 	{
 		if (key_len > USTORE_MAX_KEY_LEN) {
-			printf("[ustore] put failed due to excessive key length: %u\n", key_len);
+			printf("[ustore] put: failed due to excessive key length: %u\n", key_len);
 			return false;
 		}
 		if (len > USTORE_MAX_VALUE_LEN) {
-			printf("[ustore] put failed due to excessive data length: %u\n", len);
+			printf("[ustore] put: failed due to excessive data length: %u\n", len);
 			return false;
 		}
 
@@ -195,16 +195,20 @@ public:
 
 		uint32_t offset = current_offset;
 
-		append((uint8_t*)&hdr, sizeof(hdr));
-		append(key, key_len);
-		append(data, len);
+		append_buffer((uint8_t*)&hdr, sizeof(hdr));
+		append_buffer(key, key_len);
+		append_buffer(data, len);
 
 		RecordCommit c;
 		c.magic = MAGIC_COMMIT;
 
-		append((uint8_t*)&c, sizeof(c));
+		append_buffer((uint8_t*)&c, sizeof(c));
 
-		flush_buffer();  // ensure data is on flash before committing index entry
+		// ensure data is on flash before committing index entry
+		// if flush fails then fail put without writing index entry
+		if (!flush_buffer()) {
+			return false;
+		}
 
 		index_insert(key, key_len, current_segment, offset, ts);
 
@@ -241,9 +245,9 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 
 	bool get(const uint8_t* key, uint8_t key_len, uint8_t* out, uint16_t* size)
 	{
-//printf("[ustore] Attempting to get key %s with data size %u\n", bin_str(key, key_len), *size);
+//printf("[ustore] get: fetching key %s with data size %u\n", bin_str(key, key_len), *size);
 		if (key_len > USTORE_MAX_KEY_LEN) {
-			printf("[ustore] get failed due to excessive key length: %u\n", key_len);
+			printf("[ustore] get: failed due to excessive key length: %u\n", key_len);
 			return false;
 		}
 
@@ -251,7 +255,7 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 
 		IndexValue* e = index_find(key, key_len);
 		if (!e) {
-			printf("[ustore] get key not found in index\n");
+			printf("[ustore] get: key not found in index\n");
 			return false;
 		}
 
@@ -265,12 +269,17 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 
 		RecordHeader hdr;
 
-		if (f.read(&hdr,sizeof(hdr)) != sizeof(hdr) ||
-			hdr.magic   != MAGIC_RECORD              ||
-			hdr.key_len  > USTORE_MAX_KEY_LEN            ||
-			hdr.length   > USTORE_MAX_VALUE_LEN)
+		if (f.read(&hdr, sizeof(hdr)) != sizeof(hdr)) {
+			printf("[ustore] get: header read failed\n");
+			f.close();
+			return false;
+		}
+
+		if (hdr.magic != MAGIC_RECORD ||
+			hdr.key_len > USTORE_MAX_KEY_LEN ||
+			hdr.length > USTORE_MAX_VALUE_LEN)
 		{
-printf("[ustore] Found corrupted record!\n");
+			printf("[ustore] get: found corrupted record\n");
 			f.close();
 			return false;
 		}
@@ -278,14 +287,19 @@ printf("[ustore] Found corrupted record!\n");
 		// CBA If this is only a size request then skip reading value
 		if (out != nullptr) {
 			f.seek((long)(e->offset+sizeof(hdr)+hdr.key_len), SeekModeSet);
-			f.read(out, std::min(hdr.length, *size));
+			size_t read = std::min(hdr.length, *size);
+			if (f.read(out, read) != read) {
+				printf("[ustore] get: value read failed\n");
+				f.close();
+				return false;
+			}
 		}
 
 		*size = hdr.length;
 
 		f.close();
 
-printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, key_len), *size);
+printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_len), *size);
 //printf("[ustore] get: %s\n", bin_str((uint8_t*)out, *size));
 		return true;
 	}
@@ -326,13 +340,13 @@ printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, ke
 		hdr.crc = crc32(0, (uint8_t*)&hdr, sizeof(hdr)-4);
 		hdr.crc = crc32(hdr.crc, key, key_len);
 
-		append((uint8_t*)&hdr, sizeof(hdr));
-		append(key, key_len);
+		append_buffer((uint8_t*)&hdr, sizeof(hdr));
+		append_buffer(key, key_len);
 
 		RecordCommit c;
 		c.magic=MAGIC_COMMIT;
 
-		append((uint8_t*)&c, sizeof(c));
+		append_buffer((uint8_t*)&c, sizeof(c));
 
 		flush_buffer();  // ensure tombstone is on flash before committing index entry
 
@@ -639,7 +653,7 @@ private:
 
 	/* -------- BUFFERED WRITES -------- */
 
-	void append(const uint8_t* data,size_t len)
+	void append_buffer(const uint8_t* data, size_t len)
 	{
 		const uint8_t* p=(const uint8_t*)data;
 
@@ -648,7 +662,7 @@ private:
 			size_t space = UFSKV_WRITE_BUFFER - write_buf_pos;
 			size_t n = (len < space) ? len : space;
 
-			memcpy(write_buf+write_buf_pos,p,n);
+			memcpy(write_buf+write_buf_pos, p, n);
 
 			write_buf_pos += n;
 			p += n;
