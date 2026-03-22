@@ -609,7 +609,9 @@ public:
 	/* -------- ITERATOR -------- */
 
 	// Forward iterator over all live key-value records.
-	// Walks the in-memory index and reads one record's value from disk per step.
+	// Walks the in-memory index; key and timestamp are available with zero disk
+	// I/O. The value field is lazy-loaded on first dereference (*it or it->)
+	// and cached until operator++ advances to the next record.
 	// WARNING: Mutating the store during iteration (put/remove/clear/compact) is
 	// undefined behaviour — unordered_map iterator invalidation rules apply.
 	class iterator {
@@ -621,14 +623,19 @@ public:
 		using reference         = const Entry&;
 
 		// Default constructor — produces a singular (non-dereferenceable) iterator.
-		iterator() : store_(nullptr) {}
+		iterator() : store_(nullptr), value_loaded_(false) {}
 
-		reference operator*()  const { return current_; }
+		// operator*  — full dereference; loads the value from disk on first call
+		//              for this position. Use this when you need entry.value.
+		// operator-> — metadata-only; returns key and timestamp (already in memory)
+		//              without touching disk. entry.value will be empty unless
+		//              operator* was already called for this position.
+		reference operator*()  const { if (!value_loaded_) load_value(); return current_; }
 		pointer   operator->() const { return &current_; }
 
 		iterator& operator++() {
 			++pos_;
-			load();
+			load_meta();
 			return *this;
 		}
 
@@ -647,37 +654,48 @@ public:
 		using idx_iter = typename IndexMap::iterator;
 
 		iterator(BasicFileStore* store, idx_iter pos, idx_iter end)
-			: store_(store), pos_(pos), end_(end)
+			: store_(store), pos_(pos), end_(end), value_loaded_(false)
 		{
-			load();
+			load_meta();
 		}
 
-		void load() {
+		// Populate key and timestamp from the in-memory index. Zero disk I/O.
+		// Resets value_loaded_ so the next dereference re-reads from disk.
+		void load_meta() {
 			if (pos_ == end_) return;
-			const IndexValue& iv = pos_->second;
-			current_.key       = pos_->first;
-			current_.timestamp = iv.timestamp;
+			iv_                = pos_->second;
+			current_.key.assign(pos_->first.begin(), pos_->first.end());
+			current_.timestamp = iv_.timestamp;
+			current_.value.clear();
+			value_loaded_      = false;
+		}
 
+		// Read the value from disk into current_.value. Called lazily by
+		// operator* / operator->. Marked const so it can mutate mutable members.
+		void load_value() const {
 			char name[USTORE_MAX_FILENAME_LEN];
-			store_->segment_name(iv.segment, name);
+			store_->segment_name(iv_.segment, name);
 
 			File f = store_->_filesystem.open(name, File::ModeRead);
+			value_loaded_ = true;
 			if (!f) { current_.value.clear(); return; }
 
-			f.seek((long)iv.offset, SeekModeSet);
+			f.seek((long)iv_.offset, SeekModeSet);
 			RecordHeader hdr;
 			f.read(&hdr, sizeof(hdr));
-			f.seek((long)(iv.offset + sizeof(hdr) + hdr.key_len), SeekModeSet);
+			f.seek((long)(iv_.offset + sizeof(hdr) + hdr.key_len), SeekModeSet);
 			current_.value.resize(hdr.length);
 			if (hdr.length > 0)
 				f.read(current_.value.data(), hdr.length);
 			f.close();
 		}
 
-		BasicFileStore* store_;
-		idx_iter pos_;
-		idx_iter end_;
-		Entry current_;
+		BasicFileStore*      store_;
+		idx_iter             pos_;
+		idx_iter             end_;
+		IndexValue           iv_;
+		mutable bool         value_loaded_;
+		mutable Entry        current_;
 	};
 
 	/* -------- BEGIN / END -------- */

@@ -106,8 +106,9 @@ public:
 
         void load()
         {
-            KeyCodec::decode(it_->key, current_.key);
-            ValueCodec::decode(it_->value, current_.value);
+            const auto& raw = *it_;  // operator* triggers lazy value load
+            KeyCodec::decode(raw.key, current_.key);
+            ValueCodec::decode(raw.value, current_.value);
         }
     };
 

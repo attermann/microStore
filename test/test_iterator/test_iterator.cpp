@@ -460,6 +460,52 @@ void test_index_rebuild_persists_index() {
     TEST_ASSERT_TRUE(find_file("/test_index.dat") >= 0);
 }
 
+/* ---- Lazy value loading tests ---- */
+
+void test_iterator_value_not_loaded_until_deref() {
+    // Advancing through records without dereferencing should not load values:
+    // entry.value must stay empty until *it or it-> is used.
+    reset_ram_fs();
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
+
+    store.put("a", "AAAA");
+    store.put("b", "BBBB");
+    store.put("c", "CCCC");
+
+    int count = 0;
+    for (auto it = store.begin(); it != store.end(); ++it) {
+        // Access key and timestamp (index-only) without dereferencing for value.
+        TEST_ASSERT_FALSE(it->key.empty());
+        TEST_ASSERT_TRUE(it->value.empty());  // value not yet loaded
+        count++;
+    }
+    TEST_ASSERT_EQUAL(3, count);
+}
+
+void test_iterator_value_loaded_on_deref() {
+    // After a full dereference (*it), entry.value must be populated correctly.
+    reset_ram_fs();
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
+
+    store.put("key1", "hello");
+
+    auto it = store.begin();
+    TEST_ASSERT_TRUE(it->value.empty());  // not yet loaded
+
+    const auto& e = *it;                 // triggers lazy load
+    TEST_ASSERT_EQUAL(5, (int)e.value.size());
+    TEST_ASSERT_EQUAL(0, memcmp(e.value.data(), "hello", 5));
+
+    // Second dereference must return cached value without re-reading.
+    const auto& e2 = *it;
+    TEST_ASSERT_EQUAL(5, (int)e2.value.size());
+    TEST_ASSERT_EQUAL(0, memcmp(e2.value.data(), "hello", 5));
+}
+
 /* ---- Main ---- */
 
 int main() {
@@ -474,5 +520,7 @@ int main() {
     RUN_TEST(test_index_rebuild_respects_tombstones);
     RUN_TEST(test_index_rebuild_last_write_wins);
     RUN_TEST(test_index_rebuild_persists_index);
+    RUN_TEST(test_iterator_value_not_loaded_until_deref);
+    RUN_TEST(test_iterator_value_loaded_on_deref);
     return UNITY_END();
 }
