@@ -21,6 +21,8 @@
 #include <sys/time.h>
 #endif
 
+#include <cstring>
+
 namespace microStore {
 
 /* ---------------- TIME HELPER ---------------- */
