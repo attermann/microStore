@@ -18,8 +18,8 @@
 
 namespace microStore {
 
-template<typename Key, typename Value, typename Backend, typename KeyCodec = Codec<Key>, typename ValueCodec = Codec<Value>>
-class Table
+template<typename Key, typename Value, typename Store, typename KeyCodec = Codec<Key>, typename ValueCodec = Codec<Value>>
+class TypedStore
 {
 public:
 
@@ -29,14 +29,14 @@ public:
         Value value;
     };
 
-    Table(Backend& b):backend(b){}
+    TypedStore(Store& b):store(b){}
 
     bool put(const Key& key, const Value& value)
     {
         auto k = KeyCodec::encode(key);
         auto v = ValueCodec::encode(value);
 
-        return backend.put(k, v);
+        return store.put(k, v);
     }
 
     bool get(const Key& key, Value& value)
@@ -45,7 +45,7 @@ public:
 
         std::vector<uint8_t> raw;
 
-        if (!backend.get(k, raw)) return false;
+        if (!store.get(k, raw)) return false;
 
         return ValueCodec::decode(raw, value);
     }
@@ -53,25 +53,25 @@ public:
     bool remove(const Key& key)
     {
         auto k = KeyCodec::encode(key);
-        return backend.remove(k);
+        return store.remove(k);
     }
 
     bool exists(const Key& key)
     {
         auto k = KeyCodec::encode(key);
-        return backend.exists(k);
+        return store.exists(k);
     }
 
     size_t size()
     {
-        return backend.size();
+        return store.size();
     }
 
     class iterator
     {
     public:
 
-        iterator(typename Backend::iterator it, typename Backend::iterator end)
+        iterator(typename Store::iterator it, typename Store::iterator end)
             : it_(std::move(it)), end_(std::move(end))
         {
             if (it_ != end_) load();
@@ -96,8 +96,8 @@ public:
 
     private:
 
-        typename Backend::iterator it_;
-        typename Backend::iterator end_;
+        typename Store::iterator it_;
+        typename Store::iterator end_;
         Entry current_;
 
         void load()
@@ -109,17 +109,17 @@ public:
 
     iterator begin()
     {
-        return iterator(backend.begin(), backend.end());
+        return iterator(store.begin(), store.end());
     }
 
     iterator end()
     {
-        return iterator(backend.end(), backend.end());
+        return iterator(store.end(), store.end());
     }
 
 private:
 
-    Backend& backend;
+    Store& store;
 };
 
 }

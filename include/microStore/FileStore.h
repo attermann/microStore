@@ -16,6 +16,7 @@
 
 #include "File.h"
 #include "FileSystem.h"
+#include "Utility.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -24,12 +25,6 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
-#if defined(ARDUINO)
-#include <Arduino.h>
-#else
-#include <chrono>
-#include <sys/time.h>
-#endif
 
 namespace microStore {
 
@@ -78,40 +73,6 @@ enum JournalState { JOURNAL_NONE = 0, JOURNAL_COMPACTING = 1, JOURNAL_COMMIT = 2
 struct Journal { uint32_t magic; uint32_t state; };
 #pragma pack(pop)
 
-/* ---------------- TIME HELPER ---------------- */
-
-#ifdef ARDUINO
-// millis() is a reliable Arduino built-in on both ESP32 and nRF52840.
-// std::chrono::steady_clock is intentionally avoided: the Adafruit nRF52
-// Arduino core lacks the _gettimeofday_r backend and causes linker errors.
-static inline uint32_t ustore_millis()
-{
-	return (uint32_t)millis();
-}
-// return current time in seconds since startup
-inline static uint32_t ustore_time() {
-	// handle roll-over of 32-bit millis (approx. 49 days)
-	static uint32_t low32, high32;
-	uint32_t new_low32 = millis();
-	if (new_low32 < low32) high32++;
-	low32 = new_low32;
-	return (uint32_t)(((uint64_t)high32 << 32 | low32)/1000);
-}
-#else
-static inline uint32_t ustore_millis()
-{
-	using namespace std::chrono;
-	return (uint32_t)duration_cast<milliseconds>(
-		steady_clock::now().time_since_epoch()).count();
-}
-// return current time in seconds since 00:00:00, January 1, 1970 (Unix Epoch)
-inline static uint32_t ustore_time() {
-	timeval time;
-	::gettimeofday(&time, NULL);
-	return (uint32_t)(((uint64_t)(time.tv_sec * 1000) + (uint64_t)(time.tv_usec / 1000))/1000);
-}
-#endif
-
 
 /* ---------------- RECORD STRUCTURES ---------------- */
 
@@ -134,33 +95,17 @@ struct RecordCommit
 
 #pragma pack(pop)
 
-/* ---------------- CRC ---------------- */
-
-inline static uint32_t crc32(uint32_t crc,const uint8_t* data,size_t len)
-{
-	crc = ~crc;
-
-	for(size_t i=0;i<len;i++)
-	{
-		crc ^= data[i];
-		for(int j=0;j<8;j++)
-			crc = (crc>>1) ^ (0xEDB88320 & -(crc&1));
-	}
-
-	return ~crc;
-}
-
 /* ---------------- STORAGE ENGINE ---------------- */
 
 template<typename Allocator = std::allocator<uint8_t>>
-class BasicStore
+class BasicFileStore
 {
 public:
 
 	using allocator_type = Allocator;
 
-	BasicStore() : BasicStore(Allocator{}) {}
-	explicit BasicStore(const Allocator& alloc)
+	BasicFileStore() : BasicFileStore(Allocator{}) {}
+	explicit BasicFileStore(const Allocator& alloc)
 		: alloc_(alloc), index(map_alloc_type(alloc_)) { write_buf_pos = 0; }
 
 	allocator_type get_allocator() const { return alloc_; }
@@ -197,7 +142,7 @@ public:
 	{
 		char name[USTORE_MAX_FILENAME_LEN];
 
-		if(index_file) { index_file.close(); }
+		if (index_file) index_file.close();
 
 		for(uint32_t i=0;i<UFSKV_MAX_SEGMENTS;i++)
 		{
@@ -219,7 +164,7 @@ public:
 
 	/* -------- PUT -------- */
 
-	bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ts = ustore_time())
+	bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
 	{
 		if (key_len > USTORE_MAX_KEY_LEN) {
 			printf("[ustore] put failed due to excessive key length: %u\n", key_len);
@@ -249,14 +194,14 @@ public:
 
 		uint32_t offset = current_offset;
 
-		append(&hdr,sizeof(hdr));
-		append(key,key_len);
-		append(data,len);
+		append((uint8_t*)&hdr, sizeof(hdr));
+		append(key, key_len);
+		append(data, len);
 
 		RecordCommit c;
 		c.magic = MAGIC_COMMIT;
 
-		append(&c,sizeof(c));
+		append((uint8_t*)&c, sizeof(c));
 
 		flush_buffer();  // ensure data is on flash before committing index entry
 
@@ -271,12 +216,17 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 		return true;
 	}
 
-	inline bool put(const char* key, const void* data, uint16_t len, uint32_t ts = ustore_time())
+	inline bool put(const char* key, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
 	{
 		return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ts);
 	}
 
-	inline bool put(const std::vector<uint8_t>& key, const void* data, uint16_t len, uint32_t ts = ustore_time())
+	inline bool put(const char* key, const char* data, uint32_t ts = ustore_time())
+	{
+		return put((const uint8_t*)key, (uint8_t)strlen(key), (const uint8_t*)data, (uint16_t)strlen(data), ts);
+	}
+
+	inline bool put(const std::vector<uint8_t>& key, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
 	{
 		return put(key.data(), (uint8_t)key.size(), data, len, ts);
 	}
@@ -288,8 +238,9 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 
 	/* -------- GET -------- */
 
-	bool get(const uint8_t* key, uint8_t key_len, void* out, uint16_t* size)
+	bool get(const uint8_t* key, uint8_t key_len, uint8_t* out, uint16_t* size)
 	{
+//printf("[ustore] Attempting to get key %s with data size %u\n", bin_str(key, key_len), *size);
 		if (key_len > USTORE_MAX_KEY_LEN) {
 			printf("[ustore] get failed due to excessive key length: %u\n", key_len);
 			return false;
@@ -298,18 +249,18 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 		flush_buffer();
 
 		IndexValue* e = index_find(key, key_len);
-		if(!e) {
-			printf("[ustore] get key missing from index\n");
+		if (!e) {
+			printf("[ustore] get key not found in index\n");
 			return false;
 		}
 
 		char name[USTORE_MAX_FILENAME_LEN];
 		segment_name(e->segment,name);
 
-		File f=fs.open(name,File::ModeRead);
-		if(!f) return false;
+		File f = fs.open(name, File::ModeRead);
+		if (!f) return false;
 
-		f.seek(e->offset,SeekModeSet);
+		f.seek(e->offset, SeekModeSet);
 
 		RecordHeader hdr;
 
@@ -338,12 +289,12 @@ printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, ke
 		return true;
 	}
 
-	inline bool get(const char* key, void* out, uint16_t* size)
+	inline bool get(const char* key, uint8_t* out, uint16_t* size)
 	{
 		return get((const uint8_t*)key, (uint8_t)strlen(key), out, size);
 	}
 
-	inline bool get(const std::vector<uint8_t>& key, void* out, uint16_t* size)
+	inline bool get(const std::vector<uint8_t>& key, uint8_t* out, uint16_t* size)
 	{
 		return get(key.data(), (uint8_t)key.size(), out, size);
 	}
@@ -366,28 +317,27 @@ printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, ke
 		if(key_len > USTORE_MAX_KEY_LEN) return false;
 
 		RecordHeader hdr;
-
 		hdr.magic = MAGIC_RECORD;
 		hdr.key_len = key_len;
 		hdr.timestamp = 0;
 		hdr.length = 0;
 		hdr.flags = FLAG_DELETE;
-		hdr.crc = crc32(0,(uint8_t*)&hdr,sizeof(hdr)-4);
-		hdr.crc = crc32(hdr.crc,key,key_len);
+		hdr.crc = crc32(0, (uint8_t*)&hdr, sizeof(hdr)-4);
+		hdr.crc = crc32(hdr.crc, key, key_len);
 
-		append(&hdr,sizeof(hdr));
-		append(key,key_len);
+		append((uint8_t*)&hdr, sizeof(hdr));
+		append(key, key_len);
 
 		RecordCommit c;
 		c.magic=MAGIC_COMMIT;
 
-		append(&c,sizeof(c));
+		append((uint8_t*)&c, sizeof(c));
 
 		flush_buffer();  // ensure tombstone is on flash before committing index entry
 
 		index_remove(key, key_len);
 
-		persist_index_entry(key,key_len,0xFFFFFFFF,0);
+		persist_index_entry(key, key_len, 0xFFFFFFFF, 0);
 
 		current_offset += sizeof(RecordHeader) + key_len + sizeof(RecordCommit);
 
@@ -411,7 +361,7 @@ printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, ke
 		if(key_len > USTORE_MAX_KEY_LEN) return false;
 
 		IndexValue* e = index_find(key, key_len);
-		if(!e) return false;
+		if (!e) return false;
 		return true;
 	}
 
@@ -434,9 +384,13 @@ printf("[ustore] Successfully got key %s with data length %u\n", bin_str(key, ke
 
 	/* -------- POLICY -------- */
 
-	inline void set_policy(uint32_t ttl_s, uint32_t max_recs)
+	inline void set_ttl_secs(uint32_t ttl_s)
 	{
 		policy_ttl_s_    = ttl_s;
+	}
+
+	inline void set_max_recs(uint32_t max_recs)
+	{
 		policy_max_recs_ = max_recs;
 	}
 
@@ -631,11 +585,11 @@ public:
 		bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
 
 	private:
-		friend class BasicStore<Allocator>;
+		friend class BasicFileStore<Allocator>;
 
 		using idx_iter = typename IndexMap::iterator;
 
-		iterator(BasicStore* store, idx_iter pos, idx_iter end)
+		iterator(BasicFileStore* store, idx_iter pos, idx_iter end)
 			: store_(store), pos_(pos), end_(end)
 		{
 			load();
@@ -663,7 +617,7 @@ public:
 			f.close();
 		}
 
-		BasicStore* store_;
+		BasicFileStore* store_;
 		idx_iter pos_;
 		idx_iter end_;
 		Entry current_;
@@ -684,7 +638,7 @@ private:
 
 	/* -------- BUFFERED WRITES -------- */
 
-	void append(const void* data,size_t len)
+	void append(const uint8_t* data,size_t len)
 	{
 		const uint8_t* p=(const uint8_t*)data;
 
@@ -704,11 +658,18 @@ private:
 		}
 	}
 
-	void flush_buffer()
+	bool flush_buffer()
 	{
-		active_file.write(write_buf,write_buf_pos);
+		if (!active_file) {
+			printf("[ustore] ERROR: Active file is not valid, failed to flush buffer\n");
+			// CBA Must reset buffer pos to avoid an infinite flushing loop
+			write_buf_pos = 0;
+			return false;
+		}
+		active_file.write(write_buf, write_buf_pos);
 		active_file.flush();
-		write_buf_pos=0;
+		write_buf_pos = 0;
+		return false;
 	}
 
 	/* -------- INDEX -------- */
@@ -736,7 +697,10 @@ private:
 
 	bool persist_index_entry(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
 	{
-		if (!index_file) return false;
+		if (!index_file) {
+			printf("[ustore] ERROR: Index file is not valid\n");
+			return false;
+		}
 
 		index_file.write(&key_len, 1);
 		index_file.write(key, key_len);
@@ -780,8 +744,8 @@ private:
 		char name[USTORE_MAX_FILENAME_LEN];
 		index_name(name);
 
-		File f=fs.open(name,File::ModeRead);
-		if(!f) return false;
+		File f = fs.open(name, File::ModeRead);
+		if (!f) return false;
 
 		while(true)
 		{
@@ -853,18 +817,23 @@ private:
 		snprintf(out, USTORE_MAX_FILENAME_LEN, "%s_journal.dat", base_prefix);
 	}
 
-	void open_segment(uint32_t id)
+	bool open_segment(uint32_t id)
 	{
-		if (active_file) { active_file.close(); }
+		if (active_file) active_file.close();
 
 		char name[USTORE_MAX_FILENAME_LEN];
 		segment_name(id,name);
 
 printf("[ustore] Opening active file: %s\n", name);
-		active_file = fs.open(name,File::ModeReadAppend);
+		active_file = fs.open(name, File::ModeReadAppend);
+		if (!active_file) {
+			printf("[ustore] ERROR: Failed to open active file: %s\n", name);
+			return false;
+		}
 		current_segment=id;
 		active_file.seek(0,SeekModeEnd);
 		current_offset=active_file.tell();
+		return true;
 	}
 
 	bool rotate_segment_if_needed(uint32_t write_size)
@@ -875,7 +844,7 @@ printf("[ustore] Opening active file: %s\n", name);
 printf("[ustore] Rotating segment...\n");
 		flush_buffer();
 
-		if (active_file) { active_file.close(); }
+		if (active_file) active_file.close();
 
 		current_segment++;
 
@@ -993,7 +962,7 @@ printf("[ustore] Rotating segment...\n");
 		// Use write_index_bulk() — single flush for all entries — not persist_index_entry()
 		// which flushes after every entry and would cause N × fsync delays on flash.
 		char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
-		if (index_file) { index_file.close(); }
+		if (index_file) index_file.close();
 		fs.remove(iname);
 		write_index_bulk();
 		open_index_for_append();
@@ -1119,6 +1088,6 @@ private:
 };
 
 
-using Store = BasicStore<>;
+using FileStore = BasicFileStore<>;
 
 }

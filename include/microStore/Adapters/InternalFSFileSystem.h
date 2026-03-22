@@ -20,8 +20,8 @@
 #include "../FileSystem.h"
 
 #include <InternalFileSystem.h>
-#define FS InternalFS
-using namespace Adafruit_LittleFS_Namespace;
+//#define NS Adafruit_LittleFS_Namespace
+//#define NS Adafruit_LittleFS
 
 namespace microStore { namespace Adapters {
 
@@ -41,11 +41,11 @@ protected:
 	class FileImpl : public microStore::FileImpl {
 
 	private:
-		std::unique_ptr<File> _file;
+		std::unique_ptr<Adafruit_LittleFS_Namespace::File> _file;
 		bool _closed = false;
 
 	public:
-		FileImpl(File* file) : microStore::FileImpl(), _file(file) {}
+		FileImpl(Adafruit_LittleFS_Namespace::File* file) : microStore::FileImpl(), _file(file) {}
 		virtual ~FileImpl() { if (!_closed) close(); }
 
 	public:
@@ -61,21 +61,49 @@ protected:
 		inline virtual int available() { return _file->available(); }
 		inline virtual int peek() { return _file->peek(); }
 		inline virtual size_t tell() { return _file->position(); }
+		// CBA The InternFileSystem `File` implementation does not expose the `whence` parameter to `File::seek()`,
+		// which is required by microStore::FileStore. Since InternFileSystem lives inside the framework-arduinoadafruitnrf52,
+		// it is difficult or impossible to cleanly override this behavior without messy patching.
+		// The solution is to emulates whence-based seeking using absolute positions computed from `position()` and `size()`.
+		// - SeekModeSet — passes pos directly, no change in behavior.
+		// - SeekModeEnd — pos=0 (the only way FileStore uses it) correctly seeks to size(). If negative offsets from end were ever needed, pos would need to be a signed type in the interface — but that's not the case here.
+		// - SeekModeCur — adds pos to current position. Same unsigned caveat for backward relative seeks, but FileStore never uses this mode.
+		// - Return value now matches the interface contract: the new absolute position on success, -1 on failure (Adafruit returns bool).
+/*
 		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
 			uint8_t smode;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
-					smode = SEEK_O_CUR;
+					smode = Adafruit_LittleFS_Namespace::SEEK_O_CUR;
 					break;
 				case microStore::SeekMode::SeekModeEnd:
-					smode = SEEK_O_END;
+					smode = Adafruit_LittleFS_Namespace::SEEK_O_END;
 					break;
 				case microStore::SeekMode::SeekModeSet:
 				default:
-					smode = SEEK_O_SET;
+					smode = Adafruit_LittleFS_Namespace::SEEK_O_SET;
 					break;
 			}
 			return _file->seek(pos, smode);
+		}
+*/
+		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
+			// Adafruit_LittleFS File::seek() only supports absolute seeks (SEEK_SET).
+			// Emulate SEEK_CUR and SEEK_END by computing the absolute target position.
+			uint32_t target;
+			switch (mode) {
+				case microStore::SeekMode::SeekModeCur:
+					target = _file->position() + pos;
+					break;
+				case microStore::SeekMode::SeekModeEnd:
+					target = _file->size() + pos;
+					break;
+				case microStore::SeekMode::SeekModeSet:
+				default:
+					target = pos;
+					break;
+			}
+			return _file->seek(target) ? (long)target : -1L;
 		}
 		inline virtual void flush() { _file->flush(); }
 
@@ -92,7 +120,7 @@ protected:
 	public:
 
 		virtual bool format() override {
-			if (!FS.format()) {
+			if (!InternalFS.format()) {
 				return false;
 			}
 			return true;
@@ -119,24 +147,43 @@ protected:
 
 		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
 			int pmode;
-			if (mode == microStore::File::ModeRead) {
-				pmode = FILE_O_READ;
+			switch (mode) {
+				// Read only. File must exist. ("r")
+				case microStore::File::ModeRead:
+					pmode = Adafruit_LittleFS_Namespace::FILE_O_READ;
+					break;
+				// Write only. Creates file or truncates existing file. ("w")
+				case microStore::File::ModeWrite:
+					pmode = Adafruit_LittleFS_Namespace::FILE_O_WRITE;
+					// CBA TODO Replace remove with working truncation
+					if (InternalFS.exists(path)) {
+						InternalFS.remove(path);
+					}
+					break;
+				// Append only. Creates file if it doesn’t exist. Writes go to end. ("a")
+				case microStore::File::ModeAppend:
+					// CBA Append is the default write mode for nordicnrf52 LittleFS
+					pmode = Adafruit_LittleFS_Namespace::FILE_O_WRITE;
+					break;
+				// Read and write. Creates file or truncates existing file. ("w+")
+				case microStore::File::ModeReadWrite:
+					pmode = Adafruit_LittleFS_Namespace::FILE_O_READ | Adafruit_LittleFS_Namespace::FILE_O_WRITE;
+					// CBA TODO Replace remove with working truncation
+					if (InternalFS.exists(path)) {
+						InternalFS.remove(path);
+					}
+					break;
+				// Read and append. Creates file if it doesn’t exist. ("a+")
+				case microStore::File::ModeReadAppend:
+					// CBA Append is the default write mode for nordicnrf52 LittleFS
+					pmode = Adafruit_LittleFS_Namespace::FILE_O_READ | Adafruit_LittleFS_Namespace::FILE_O_WRITE;
+					break;
+				// Read and write. File must exist. ("r+") ???
+				default:
+					return {};
 			}
-			else if (mode == microStore::File::ModeWrite) {
-				pmode = FILE_O_WRITE;
-				// CBA TODO Replace remove with working truncation
-				if (FS.exists(path)) {
-					FS.remove(path);
-				}
-			}
-			else if (mode == microStore::File::ModeAppend) {
-				// CBA This is the default write mode for nrf52 littlefs
-				pmode = FILE_O_WRITE;
-			}
-			else {
-				return {};
-			}
-			File* file = new File(FS);
+			Adafruit_LittleFS_Namespace::File* file = new Adafruit_LittleFS_Namespace::File(InternalFS);
+//printf("[ustore] opening file: %s, mode: %u\n", path, pmode);
 			if (!file->open(path, pmode)) {
 				return {};
 			}
@@ -150,26 +197,26 @@ protected:
 
 
 		virtual bool exists(const char* path) override {
-			return FS.exists(path);
+			return InternalFS.exists(path);
 		}
 
 		virtual bool remove(const char* path) override {
-			return FS.remove(path);
+			return InternalFS.remove(path);
 		}
 
 		virtual bool rename(const char* from_path, const char* to_path) override {
-			return FS.rename(from_path, to_path);
+			return InternalFS.rename(from_path, to_path);
 		}
 
 		virtual bool mkdir(const char* path) override {
-			if (!FS.mkdir(path)) {
+			if (!InternalFS.mkdir(path)) {
 				return false;
 			}
 			return true;
 		}
 
 		virtual bool rmdir(const char* path) override {
-			if (!FS.rmdir_r(path)) {
+			if (!InternalFS.rmdir_r(path)) {
 				return false;
 			}
 			return true;
@@ -177,8 +224,8 @@ protected:
 
 
 		virtual bool isDirectory(const char* path) override {
-			File file(FS);
-			if (file.open(path, FILE_O_READ)) {
+			Adafruit_LittleFS_Namespace::File file(InternalFS);
+			if (file.open(path, Adafruit_LittleFS_Namespace::FILE_O_READ)) {
 				bool is_directory = file.isDirectory();
 				file.close();
 				return is_directory;
@@ -188,11 +235,11 @@ protected:
 
 		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
-			File root = FS.open(path);
+			Adafruit_LittleFS_Namespace::File root = InternalFS.open(path);
 			if (!root) {
 				return files;
 			}
-			File file = root.openNextFile();
+			Adafruit_LittleFS_Namespace::File file = root.openNextFile();
 			while (file) {
 				if (!file.isDirectory()) {
 					char* name = (char*)file.name();

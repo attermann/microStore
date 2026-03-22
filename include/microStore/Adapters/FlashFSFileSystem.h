@@ -21,8 +21,6 @@
 
 #include <Cached_SPIFlash.h>
 #include <FlashFileSystem.h>
-#define FS FlashFS
-using namespace Adafruit_LittleFS;
 
 namespace microStore { namespace Adapters {
 
@@ -63,11 +61,11 @@ protected:
 	class FileImpl : public microStore::FileImpl {
 
 	private:
-		std::unique_ptr<File> _file;
+		std::unique_ptr<Adafruit_LittleFS::File> _file;
 		bool _closed = false;
 
 	public:
-		FileImpl(File* file) : microStore::FileImpl(), _file(file) {}
+		FileImpl(Adafruit_LittleFS::File* file) : microStore::FileImpl(), _file(file) {}
 		virtual ~FileImpl() { if (!_closed) close(); }
 
 	public:
@@ -87,14 +85,14 @@ protected:
 			uint8_t smode;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
-					smode = SEEK_O_CUR;
+					smode = Adafruit_LittleFS::SEEK_O_CUR;
 					break;
 				case microStore::SeekMode::SeekModeEnd:
-					smode = SEEK_O_END;
+					smode = Adafruit_LittleFS::SEEK_O_END;
 					break;
 				case microStore::SeekMode::SeekModeSet:
 				default:
-					smode = SEEK_O_SET;
+					smode = Adafruit_LittleFS::SEEK_O_SET;
 					break;
 			}
 			return _file->seek(pos, smode);
@@ -144,24 +142,42 @@ protected:
 
 		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
 			int pmode;
-			if (mode == microStore::File::ModeRead) {
-				pmode = FILE_O_READ;
+			switch (mode) {
+				// Read only. File must exist. ("r")
+				case microStore::File::ModeRead:
+					pmode = Adafruit_LittleFS::FILE_O_READ;
+					break;
+				// Write only. Creates file or truncates existing file. ("w")
+				case microStore::File::ModeWrite:
+					pmode = Adafruit_LittleFS::FILE_O_WRITE;
+					// CBA TODO Replace remove with working truncation
+					if (FlashFS.exists(path)) {
+						FlashFS.remove(path);
+					}
+					break;
+				// Append only. Creates file if it doesn’t exist. Writes go to end. ("a")
+				case microStore::File::ModeAppend:
+					// CBA Append is the default write mode for nordicnrf52 LittleFS
+					pmode = Adafruit_LittleFS::FILE_O_WRITE;
+					break;
+				// Read and write. Creates file or truncates existing file. ("w+")
+				case microStore::File::ModeReadWrite:
+					pmode = Adafruit_LittleFS::FILE_O_READ | Adafruit_LittleFS::FILE_O_WRITE;
+					// CBA TODO Replace remove with working truncation
+					if (FlashFS.exists(path)) {
+						FlashFS.remove(path);
+					}
+					break;
+				// Read and append. Creates file if it doesn’t exist. ("a+")
+				case microStore::File::ModeReadAppend:
+					// CBA Append is the default write mode for nordicnrf52 LittleFS
+					pmode = Adafruit_LittleFS::FILE_O_READ | Adafruit_LittleFS::FILE_O_WRITE;
+					break;
+				// Read and write. File must exist. ("r+") ???
+				default:
+					return {};
 			}
-			else if (mode == microStore::File::ModeWrite) {
-				pmode = FILE_O_WRITE;
-				// CBA TODO Replace remove with working truncation
-				if (FlashFS.exists(path)) {
-					FlashFS.remove(path);
-				}
-			}
-			else if (mode == microStore::File::ModeAppend) {
-				// CBA This is the default write mode for nrf52 littlefs
-				pmode = FILE_O_WRITE;
-			}
-			else {
-				return {};
-			}
-			File* file = new File(FS);
+			Adafruit_LittleFS::File* file = new Adafruit_LittleFS::File(FlashFS);
 			if (!file->open(path, pmode)) {
 				return {};
 			}
@@ -202,8 +218,8 @@ protected:
 
 
 		virtual bool isDirectory(const char* path) override {
-			File file(FS);
-			if (file.open(path, FILE_O_READ)) {
+			Adafruit_LittleFS::File file(FlashFS);
+			if (file.open(path, Adafruit_LittleFS::FILE_O_READ)) {
 				bool is_directory = file.isDirectory();
 				file.close();
 				return is_directory;
@@ -213,11 +229,11 @@ protected:
 
 		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
-			File root = FlashFS.open(path);
+			Adafruit_LittleFS::File root = FlashFS.open(path);
 			if (!root) {
 				return files;
 			}
-			File file = root.openNextFile();
+			Adafruit_LittleFS::File file = root.openNextFile();
 			while (file) {
 				if (!file.isDirectory()) {
 					char* name = (char*)file.name();

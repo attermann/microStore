@@ -225,21 +225,27 @@ protected:
 		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
 			const char* pmode;
 			switch (mode) {
+				// Read only. File must exist. ("r")
 				case microStore::File::ModeRead:
 					pmode = "r";
 					break;
+				// Write only. Creates file or truncates existing file. ("w")
 				case microStore::File::ModeWrite:
 					pmode = "w";
 					break;
+				// Append only. Creates file if it doesn’t exist. Writes go to end. ("a")
 				case microStore::File::ModeAppend:
 					pmode = "a";
 					break;
+				// Read and write. Creates file or truncates existing file. ("w+")
 				case microStore::File::ModeReadWrite:
 					pmode = "w+";
 					break;
+				// Read and append. Creates file if it doesn’t exist. ("a+")
 				case microStore::File::ModeReadAppend:
 					pmode = "a+";
 					break;
+				// Read and write. File must exist. ("r+") ???
 				default:
 					return {};
 			}

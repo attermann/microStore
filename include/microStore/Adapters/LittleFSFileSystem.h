@@ -39,11 +39,11 @@ protected:
 	class FileImpl : public microStore::FileImpl {
 
 	private:
-		std::unique_ptr<File> _file;
+		std::unique_ptr<fs::File> _file;
 		bool _closed = false;
 
 	public:
-		FileImpl(File* file) : microStore::FileImpl(), _file(file) {}
+		FileImpl(fs::File* file) : microStore::FileImpl(), _file(file) {}
 		virtual ~FileImpl() { if (!_closed) close(); }
 
 	public:
@@ -114,26 +114,32 @@ protected:
 		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
 			const char* pmode;
 			switch (mode) {
+				// Read only. File must exist. ("r")
 				case microStore::File::ModeRead:
 					pmode = FILE_READ;
 					break;
+				// Write only. Creates file or truncates existing file. ("w")
 				case microStore::File::ModeWrite:
 					pmode = FILE_WRITE;
 					break;
+				// Append only. Creates file if it doesn’t exist. Writes go to end. ("a")
 				case microStore::File::ModeAppend:
 					pmode = FILE_APPEND;
 					break;
+				// Read and write. Creates file or truncates existing file. ("w+")
 				case microStore::File::ModeReadWrite:
 					pmode = "w+";
 					break;
+				// Read and append. Creates file if it doesn’t exist. ("a+")
 				case microStore::File::ModeReadAppend:
 					pmode = "a+";
 					break;
+				// Read and write. File must exist. ("r+") ???
 				default:
 					return {};
 			}
 			// CBA Using copy constructor to obtain File*
-			File* file = new File(LittleFS.open(path, pmode));
+			fs::File* file = new fs::File(LittleFS.open(path, pmode));
 			if (file == nullptr || !(*file)) {
 				return {};
 			}
@@ -165,7 +171,7 @@ protected:
 
 
 		virtual bool isDirectory(const char* path) override {
-			File file = LittleFS.open(path, FILE_READ);
+			fs::File file = LittleFS.open(path, FILE_READ);
 			if (file) {
 				bool is_directory = file.isDirectory();
 				file.close();
@@ -176,11 +182,11 @@ protected:
 
 		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
-			File root = LittleFS.open(path);
+			fs::File root = LittleFS.open(path);
 			if (!root) {
 				return files;
 			}
-			File file = root.openNextFile();
+			fs::File file = root.openNextFile();
 			while (file) {
 				if (!file.isDirectory()) {
 					char* name = (char*)file.name();

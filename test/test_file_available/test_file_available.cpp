@@ -1,6 +1,6 @@
 #include <unity.h>
 #include <microStore/FileSystem.h>
-#include <microStore/impl/PosixFileSystemImpl.h>
+#include <microStore/Adapters/PosixFileSystem.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -9,7 +9,7 @@
 static const char* TEST_FILE = "/tmp/test_file_available.bin";
 
 static microStore::File open_test_file(microStore::File::Mode mode) {
-    microStoreImpl::PosixFileSystemImpl fs;
+    microStore::Adapters::PosixFileSystem fs;
     return fs.open(TEST_FILE, mode);
 }
 

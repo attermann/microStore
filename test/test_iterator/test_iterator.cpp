@@ -4,7 +4,7 @@
  */
 
 #include <unity.h>
-#include <microStore/Store.h>
+#include <microStore/FileStore.h>
 
 #include <cstring>
 #include <cstdio>
@@ -210,15 +210,16 @@ static void reset_ram_fs() {
 }
 
 static microStore::FileSystem make_ram_fs() {
-    return microStore::FileSystem(new RamFileSystemImpl());
+    return microStore::FileSystem{new RamFileSystemImpl()};
 }
 
 /* ---- Tests ---- */
 
 void test_iterator_empty_store() {
     reset_ram_fs();
-    microStore::Store store;
-    store.init(make_ram_fs(), "/test");
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
 
     int count = 0;
     for (auto& e : store) {
@@ -230,11 +231,12 @@ void test_iterator_empty_store() {
 
 void test_iterator_single_record() {
     reset_ram_fs();
-    microStore::Store store;
-    store.init(make_ram_fs(), "/test");
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
 
     const char* val = "hello";
-    store.put("mykey", 42, val, (uint16_t)strlen(val));
+    store.put("mykey", val, 42u);
 
     int count = 0;
     for (auto& e : store) {
@@ -250,12 +252,13 @@ void test_iterator_single_record() {
 
 void test_iterator_multiple_records() {
     reset_ram_fs();
-    microStore::Store store;
-    store.init(make_ram_fs(), "/test");
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
 
-    store.put("alpha", 1, "AAA", 3);
-    store.put("beta",  2, "BB",  2);
-    store.put("gamma", 3, "C",   1);
+    store.put("alpha", "AAA");
+    store.put("beta", "BB");
+    store.put("gamma", "C");
 
     // Collect results into a map for order-independent comparison
     std::map<std::string, std::string> seen;
@@ -273,11 +276,12 @@ void test_iterator_multiple_records() {
 
 void test_iterator_skips_deleted_keys() {
     reset_ram_fs();
-    microStore::Store store;
-    store.init(make_ram_fs(), "/test");
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
 
-    store.put("keep",   1, "yes", 3);
-    store.put("delete", 2, "no",  2);
+    store.put("keep", "yes");
+    store.put("delete", "no");
     store.remove("delete");
 
     std::map<std::string, std::string> seen;
@@ -294,11 +298,12 @@ void test_iterator_skips_deleted_keys() {
 
 void test_iterator_overwrite_shows_latest() {
     reset_ram_fs();
-    microStore::Store store;
-    store.init(make_ram_fs(), "/test");
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
 
-    store.put("k", 1, "first",  5);
-    store.put("k", 2, "second", 6);
+    store.put("k", "first");
+    store.put("k", "second");
 
     std::vector<std::string> vals;
     for (auto& e : store) {
@@ -311,7 +316,7 @@ void test_iterator_overwrite_shows_latest() {
 
 void test_iterator_satisfies_forward_iterator() {
     // Compile-time check: iterator_traits must resolve correctly.
-    using It = microStore::Store::iterator;
+    using It = microStore::FileStore::iterator;
     static_assert(
         std::is_same<
             std::iterator_traits<It>::iterator_category,
@@ -322,7 +327,7 @@ void test_iterator_satisfies_forward_iterator() {
     static_assert(
         std::is_same<
             std::iterator_traits<It>::value_type,
-            microStore::Store::Entry
+            microStore::FileStore::Entry
         >::value,
         "value_type must be Entry"
     );

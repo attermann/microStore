@@ -14,7 +14,7 @@
 
 #pragma once
 
-//#if defined(USTORE_USE_NOOPFS)
+#if defined(USTORE_USE_NOOPFS)
 
 #include "../File.h"
 #include "../FileSystem.h"
@@ -88,4 +88,4 @@ protected:
 
 } }
 
-//#endif
+#endif
