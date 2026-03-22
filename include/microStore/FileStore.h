@@ -78,7 +78,12 @@ static const uint32_t JOURNAL_MAGIC = 0x4B564A4E;
 enum JournalState { JOURNAL_NONE = 0, JOURNAL_COMPACTING = 1, JOURNAL_COMMIT = 2 };
 
 #pragma pack(push,1)
-struct Journal { uint32_t magic; uint32_t state; };
+struct Journal {
+	uint32_t magic;
+	uint32_t state;           // JOURNAL_NONE / COMPACTING / COMMIT
+	uint32_t next_seg;        // segments 0..next_seg-1 are committed to compact.tmp
+	uint32_t tmp_valid_size;  // byte count of compact.tmp that is durably valid
+};
 #pragma pack(pop)
 
 
@@ -806,6 +811,7 @@ private:
 			for (size_t i = 0; i < to_evict; i++)
 				_index.erase(candidates[i].second);
 		}
+printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 
 		return to_evict;
 	}
@@ -991,12 +997,16 @@ printf("[ustore] Rotating segment...\n");
 
 	/* -------- JOURNAL HELPERS -------- */
 
-	void write_journal(uint32_t state)
+	void write_journal(uint32_t state, uint32_t next_seg = 0, uint32_t tmp_valid_size = 0)
 	{
 		char name[USTORE_MAX_FILENAME_LEN]; journal_name(name);
 		File f = _filesystem.open(name, File::ModeWrite);
 		if (!f) return;
-		Journal j; j.magic = JOURNAL_MAGIC; j.state = state;
+		Journal j;
+		j.magic          = JOURNAL_MAGIC;
+		j.state          = state;
+		j.next_seg       = next_seg;
+		j.tmp_valid_size = tmp_valid_size;
 		f.write(&j, sizeof(j));
 		f.flush();
 		f.close();
@@ -1023,13 +1033,31 @@ printf("[ustore] Rotating segment...\n");
 			return;
 		}
 
+		char tmp_name[USTORE_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
+
 		if (j.state == JOURNAL_COMMIT) {
 			// Tmp file is complete — finish the swap.
 			finalize_compaction();
+		} else if (j.next_seg == 0) {
+			// COMPACTING, no source segments deleted yet — tmp may be partial, discard it.
+			// All original segments are intact; normal boot proceeds.
+			_filesystem.remove(tmp_name);
 		} else {
-			// COMPACTING: tmp may be partial — just discard it.
-			char tmp[USTORE_MAX_FILENAME_LEN]; snprintf(tmp, sizeof(tmp), "%s_compact.tmp", base_prefix);
-			_filesystem.remove(tmp);
+			// COMPACTING with next_seg > 0: source segments 0..next_seg-1 have been deleted.
+			// compact.tmp holds their live records up to byte tmp_valid_size (bytes beyond
+			// that are either extra valid records from a flushed-but-not-journaled segment,
+			// or a partial write stopped by the crash — both are handled harmlessly by the
+			// segment scan in rebuild_index_from_segments()).
+			//
+			// Recovery strategy: rename compact.tmp → segment_0.dat so that the normal
+			// boot index rebuild picks it up alongside the surviving segments next_seg..7.
+			// The next compaction cycle will consolidate everything correctly.
+			char seg0[USTORE_MAX_FILENAME_LEN]; segment_name(0, seg0);
+			if (!_filesystem.rename(tmp_name, seg0)) {
+				// Rename failed (e.g. filesystem error). Best effort: leave compact.tmp
+				// in place; the next boot will retry this same recovery path.
+				return;  // keep journal so next boot retries
+			}
 		}
 
 		_filesystem.remove(name);  // clear journal
@@ -1141,8 +1169,8 @@ public:
 	{
 printf("[ustore] Compacting storage...\n");
 
-		// --- Phase 1: write COMPACTING journal ---
-		write_journal(JOURNAL_COMPACTING);
+		// --- Phase 1: write COMPACTING journal (next_seg=0: no source segments deleted yet) ---
+		write_journal(JOURNAL_COMPACTING, 0, 0);
 
 		char tmp_name[USTORE_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
 printf("[ustore] Opening tmp file: %s\n", tmp_name);
@@ -1174,41 +1202,61 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 					[](const LiveRec& a, const LiveRec& b){ return a.offset < b.offset; });
 		}
 
-		// --- Phase 3: one open/close per segment, read live records in offset order ---
+		// --- Phase 3: process segments one at a time ---
+		// For each segment s:
+		//   1. Copy live records from s to compact.tmp.
+		//   2. Flush compact.tmp to disk.
+		//   3. Write journal (next_seg=s+1, tmp_valid_size=current byte count).
+		//   4. Delete source segment s.
+		// Steps 3 and 4 MUST be in this order: the journal is updated BEFORE the source
+		// segment is deleted. If power fails between step 3 and step 4, the next boot's
+		// recover_if_needed() sees next_seg=s+1 and renames compact.tmp to segment 0, then
+		// finalize_compaction() deletes the still-present segment s — no data is lost.
+		//
 		// Static to avoid placing 1 KB on the stack — compact() is not re-entrant.
 		uint8_t key_buf[USTORE_MAX_KEY_LEN];
 		static uint8_t val_buf[USTORE_MAX_VALUE_LEN];
 		bool write_ok = true;
+		uint32_t committed_segs = 0;  // number of source segments committed to compact.tmp
 
-		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS && write_ok; s++) {
-			if (per_seg[s].empty()) continue;
-
+		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
 			char src_name[USTORE_MAX_FILENAME_LEN]; segment_name(s, src_name);
-printf("[ustore] Opening src file: %s\n", src_name);
-			File src = _filesystem.open(src_name, File::ModeRead);
-			if (!src) continue;
 
-			for (size_t i = 0; i < per_seg[s].size(); i++) {
-				LiveRec& lr = per_seg[s][i];
-				src.seek((long)lr.offset, SeekModeSet);
-				RecordHeader hdr;
-				if (src.read(&hdr, sizeof(hdr)) != sizeof(hdr)) continue;
-				if (hdr.magic != MAGIC_RECORD || hdr.key_len > USTORE_MAX_KEY_LEN ||
-					hdr.length > USTORE_MAX_VALUE_LEN) continue;
-				if (src.read(key_buf, hdr.key_len) != hdr.key_len) continue;
-				if (hdr.length > 0 && src.read(val_buf, hdr.length) != hdr.length) continue;
-				RecordCommit c; c.magic = MAGIC_COMMIT;
-				uint32_t expected = sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
-				size_t written = 0;
-				written += outf.write(&hdr,    sizeof(hdr));
-				written += outf.write(key_buf, hdr.key_len);
-				if (hdr.length > 0) written += outf.write(val_buf, hdr.length);
-				written += outf.write(&c, sizeof(c));
-				if (written != expected) { write_ok = false; break; }
+			if (!per_seg[s].empty()) {
+printf("[ustore] Opening src file: %s\n", src_name);
+				File src = _filesystem.open(src_name, File::ModeRead);
+				if (src) {
+					for (size_t i = 0; i < per_seg[s].size(); i++) {
+						LiveRec& lr = per_seg[s][i];
+						src.seek((long)lr.offset, SeekModeSet);
+						RecordHeader hdr;
+						if (src.read(&hdr, sizeof(hdr)) != sizeof(hdr)) continue;
+						if (hdr.magic != MAGIC_RECORD || hdr.key_len > USTORE_MAX_KEY_LEN ||
+							hdr.length > USTORE_MAX_VALUE_LEN) continue;
+						if (src.read(key_buf, hdr.key_len) != hdr.key_len) continue;
+						if (hdr.length > 0 && src.read(val_buf, hdr.length) != hdr.length) continue;
+						RecordCommit c; c.magic = MAGIC_COMMIT;
+						uint32_t expected = sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
+						size_t written = 0;
+						written += outf.write(&hdr,    sizeof(hdr));
+						written += outf.write(key_buf, hdr.key_len);
+						if (hdr.length > 0) written += outf.write(val_buf, hdr.length);
+						written += outf.write(&c, sizeof(c));
+						if (written != expected) { write_ok = false; break; }
+					}
+printf("[ustore] Closing src file: %s\n", src_name);
+					src.close();
+				}
 			}
 
-printf("[ustore] Closing src file: %s\n", src_name);
-			src.close();
+			if (!write_ok) break;
+
+			// Flush compact.tmp, journal BEFORE deleting the source segment (see comment above).
+			outf.flush();
+			uint32_t valid_size = (uint32_t)outf.tell();
+			write_journal(JOURNAL_COMPACTING, s + 1, valid_size);
+			_filesystem.remove(src_name);  // no-op if segment had no records / did not exist
+			committed_segs++;
 		}
 
 		outf.flush();
@@ -1216,9 +1264,18 @@ printf("[ustore] Closing tmp file: %s\n", tmp_name);
 		outf.close();
 
 		if (!write_ok) {
-			printf("[ustore] Compact aborted: storage full, segments preserved\n");
-			_filesystem.remove(tmp_name);
-			clear_journal();   // journal is still COMPACTING — safe to discard
+			if (committed_segs == 0) {
+				// No source segments were deleted — safe to discard compact.tmp entirely.
+				printf("[ustore] Compact aborted: storage full, all segments preserved\n");
+				_filesystem.remove(tmp_name);
+				clear_journal();
+			} else {
+				// Some source segments were already deleted; compact.tmp holds their records.
+				// Leave compact.tmp and the journal in place. recover_if_needed() on the
+				// next boot will rename compact.tmp to segment 0 and recover cleanly.
+				printf("[ustore] Compact aborted mid-way after %u segments: recovery on next boot\n",
+				       committed_segs);
+			}
 			return false;
 		}
 
