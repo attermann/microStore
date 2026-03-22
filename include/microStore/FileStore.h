@@ -117,7 +117,8 @@ public:
 
 		recover_if_needed();
 
-		load_index();
+		if (!load_index())
+			rebuild_index_from_segments();
 
 		open_index_for_append();
 
@@ -969,6 +970,52 @@ printf("[ustore] Rotating segment...\n");
 
 		current_segment = 0;
 		// current_offset is set by open_segment() which the caller will invoke next.
+	}
+
+	/* -------- INDEX REBUILD FROM LOG -------- */
+
+	// Called when the index file is missing. Scans all segment files in write
+	// order to reconstruct the in-memory index, then persists it so future
+	// boots are fast.  Uses the same record-walk logic as finalize_compaction().
+	void rebuild_index_from_segments()
+	{
+		printf("[ustore] Index missing — rebuilding from segment files...\n");
+		index.clear();
+
+		for (uint32_t seg = 0; seg < UFSKV_MAX_SEGMENTS; seg++)
+		{
+			char sname[USTORE_MAX_FILENAME_LEN];
+			segment_name(seg, sname);
+			File f = fs.open(sname, File::ModeRead);
+			if (!f) continue;
+
+			uint32_t scan_offset = 0;
+			uint8_t  key_buf[USTORE_MAX_KEY_LEN];
+			while (true)
+			{
+				RecordHeader hdr;
+				if (f.read(&hdr, sizeof(hdr)) != sizeof(hdr)) break;
+				if (hdr.magic != MAGIC_RECORD || hdr.key_len == 0 ||
+					hdr.key_len > USTORE_MAX_KEY_LEN || hdr.length > USTORE_MAX_VALUE_LEN) break;
+				if (f.read(key_buf, hdr.key_len) != hdr.key_len) break;
+				f.seek((long)(scan_offset + sizeof(hdr) + hdr.key_len + hdr.length), SeekModeSet);
+				RecordCommit c;
+				if (f.read(&c, sizeof(c)) != sizeof(c)) break;
+				if (c.magic != MAGIC_COMMIT) break;
+				if (hdr.flags & FLAG_DELETE)
+					index_remove(key_buf, hdr.key_len);
+				else
+					index_insert(key_buf, hdr.key_len, seg, scan_offset, hdr.timestamp);
+				scan_offset += sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
+			}
+			f.close();
+		}
+
+		// Persist the rebuilt index so the next boot uses the fast path.
+		char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
+		if (index_file) index_file.close();
+		fs.remove(iname);
+		write_index_bulk();
 	}
 
 	/* -------- COMPACTION -------- */

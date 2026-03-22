@@ -334,6 +334,131 @@ void test_iterator_satisfies_forward_iterator() {
     TEST_PASS();
 }
 
+/* ---- Index rebuild tests ---- */
+
+// Helper: remove a file from the RAM filesystem by name.
+static void remove_ram_file(const char* name) {
+    int idx = find_file(name);
+    if (idx < 0) return;
+    g_files[idx].data.clear();
+    g_files[idx].pos = 0;
+    for (int i = idx; i < g_nfiles - 1; i++) {
+        g_files[i] = g_files[i + 1];
+        strncpy(g_names[i], g_names[i + 1], 63);
+    }
+    g_nfiles--;
+}
+
+void test_index_rebuild_restores_all_keys() {
+    reset_ram_fs();
+    auto fs = make_ram_fs();
+
+    // Write several keys using a first store instance.
+    {
+        microStore::FileStore store;
+        store.init(fs, "/test");
+        store.put("alpha", "AAA");
+        store.put("beta",  "BB");
+        store.put("gamma", "C");
+    }
+
+    // Delete the index file to simulate a missing-index-on-boot scenario.
+    remove_ram_file("/test_index.dat");
+
+    // Re-init a fresh store instance against the same RAM filesystem.
+    microStore::FileStore store2;
+    store2.init(fs, "/test");
+
+    // All three keys must be visible.
+    std::map<std::string, std::string> seen;
+    for (auto& e : store2) {
+        std::string k(e.key.begin(), e.key.end());
+        std::string v(e.value.begin(), e.value.end());
+        seen[k] = v;
+    }
+
+    TEST_ASSERT_EQUAL(3, (int)seen.size());
+    TEST_ASSERT_EQUAL_STRING("AAA", seen["alpha"].c_str());
+    TEST_ASSERT_EQUAL_STRING("BB",  seen["beta"].c_str());
+    TEST_ASSERT_EQUAL_STRING("C",   seen["gamma"].c_str());
+}
+
+void test_index_rebuild_respects_tombstones() {
+    reset_ram_fs();
+    auto fs = make_ram_fs();
+
+    {
+        microStore::FileStore store;
+        store.init(fs, "/test");
+        store.put("keep",   "yes");
+        store.put("remove", "no");
+        store.remove("remove");
+    }
+
+    remove_ram_file("/test_index.dat");
+
+    microStore::FileStore store2;
+    store2.init(fs, "/test");
+
+    std::map<std::string, std::string> seen;
+    for (auto& e : store2) {
+        std::string k(e.key.begin(), e.key.end());
+        std::string v(e.value.begin(), e.value.end());
+        seen[k] = v;
+    }
+
+    TEST_ASSERT_EQUAL(1, (int)seen.size());
+    TEST_ASSERT_EQUAL_STRING("yes", seen["keep"].c_str());
+    TEST_ASSERT_FALSE(seen.count("remove"));
+}
+
+void test_index_rebuild_last_write_wins() {
+    reset_ram_fs();
+    auto fs = make_ram_fs();
+
+    {
+        microStore::FileStore store;
+        store.init(fs, "/test");
+        store.put("k", "first");
+        store.put("k", "second");
+    }
+
+    remove_ram_file("/test_index.dat");
+
+    microStore::FileStore store2;
+    store2.init(fs, "/test");
+
+    std::vector<std::string> vals;
+    for (auto& e : store2)
+        vals.push_back(std::string(e.value.begin(), e.value.end()));
+
+    TEST_ASSERT_EQUAL(1, (int)vals.size());
+    TEST_ASSERT_EQUAL_STRING("second", vals[0].c_str());
+}
+
+void test_index_rebuild_persists_index() {
+    // After a rebuild, the index file must be re-created so the next boot uses
+    // the fast load_index() path rather than scanning segments again.
+    reset_ram_fs();
+    auto fs = make_ram_fs();
+
+    {
+        microStore::FileStore store;
+        store.init(fs, "/test");
+        store.put("x", "val");
+    }
+
+    remove_ram_file("/test_index.dat");
+
+    // First re-init triggers the rebuild and should recreate the index file.
+    {
+        microStore::FileStore store2;
+        store2.init(fs, "/test");
+    }
+
+    TEST_ASSERT_TRUE(find_file("/test_index.dat") >= 0);
+}
+
 /* ---- Main ---- */
 
 int main() {
@@ -344,5 +469,9 @@ int main() {
     RUN_TEST(test_iterator_skips_deleted_keys);
     RUN_TEST(test_iterator_overwrite_shows_latest);
     RUN_TEST(test_iterator_satisfies_forward_iterator);
+    RUN_TEST(test_index_rebuild_restores_all_keys);
+    RUN_TEST(test_index_rebuild_respects_tombstones);
+    RUN_TEST(test_index_rebuild_last_write_wins);
+    RUN_TEST(test_index_rebuild_persists_index);
     return UNITY_END();
 }
