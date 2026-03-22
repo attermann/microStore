@@ -122,9 +122,11 @@ protected:
 			printf("[ustore] Initializing FlashFileSystem\n");
 			// Initialize FlashFileSystem
 			if (!g_flash.begin(&g_RAK15001)) {
+				printf("[ustore] Failed to initialize flash for FlashFileSystem!\n");
 				return false;
 			}
 			if (!FlashFS.begin(&g_flash)) {
+				printf("[ustore] Failed to initialize FlashFileSystem!\n");
 				return false;
 			}
 	/*

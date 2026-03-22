@@ -31,39 +31,43 @@ public:
 
     TypedStore(Store& b):store(b){}
 
+	inline bool isValid() const { return store.isValid(); }
+	inline operator bool() const { return isValid(); }
+
     bool put(const Key& key, const Value& value)
     {
+        if (!isValid()) return false;
         auto k = KeyCodec::encode(key);
         auto v = ValueCodec::encode(value);
-
         return store.put(k, v);
     }
 
     bool get(const Key& key, Value& value)
     {
+        if (!isValid()) return false;
         auto k = KeyCodec::encode(key);
-
         std::vector<uint8_t> raw;
-
         if (!store.get(k, raw)) return false;
-
         return ValueCodec::decode(raw, value);
     }
 
     bool remove(const Key& key)
     {
+        if (!isValid()) return false;
         auto k = KeyCodec::encode(key);
         return store.remove(k);
     }
 
     bool exists(const Key& key)
     {
+        if (!isValid()) return false;
         auto k = KeyCodec::encode(key);
         return store.exists(k);
     }
 
     size_t size()
     {
+        if (!isValid()) return 0;
         return store.size();
     }
 

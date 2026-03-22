@@ -130,6 +130,7 @@ protected:
 			printf("[ustore] Initializing InternalFileSystem\n");
 			// Initialize InternalFileSystem
 			if (!InternalFS.begin()) {
+				printf("[ustore] Failed to initialize InternalFSFileSystem!\n");
 				return false;
 			}
 	/*

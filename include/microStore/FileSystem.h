@@ -65,6 +65,8 @@ protected:
 	virtual size_t storageSize() = 0;
 	virtual size_t storageAvailable() = 0;
 
+	virtual bool isValid() const { return true; }
+
 friend class FileSystem;
 };
 
@@ -81,13 +83,14 @@ public:
 
 	inline FileSystem& operator = (const FileSystem& obj) { _impl = obj._impl; return *this; }
 	inline FileSystem& operator = (FileSystemImpl* impl) { _impl.reset(impl); return *this; }
-	inline operator bool() const { return _impl.get() != nullptr; }
 	inline bool operator < (const FileSystem& obj) const { return _impl.get() < obj._impl.get(); }
 	inline bool operator > (const FileSystem& obj) const { return _impl.get() > obj._impl.get(); }
 	inline bool operator == (const FileSystem& obj) const { return _impl.get() == obj._impl.get(); }
 	inline bool operator != (const FileSystem& obj) const { return _impl.get() != obj._impl.get(); }
 	inline FileSystemImpl* get() { return _impl.get(); }
 	inline void clear() { _impl.reset(); }
+	inline bool isValid() const { if (_impl.get() == nullptr) return false; return _impl->isValid(); }
+	inline operator bool() const { return isValid(); }
 
 public:
 	inline bool format() { assert(_impl); return _impl->format(); }

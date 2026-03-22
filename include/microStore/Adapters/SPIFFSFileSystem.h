@@ -100,6 +100,7 @@ protected:
 			printf("[ustore] Initializing SPIFFSFileSystem\n");
 			// Initialize SPIFFS
 			if (!SPIFFS.begin(true, "")) {
+				printf("[ustore] Failed to initialize SPIFFSFileSystem!\n");
 				return false;
 			}
 	/*

@@ -97,7 +97,10 @@ protected:
 		inline virtual bool init() override {
 			printf("[ustore] Initializing LittleFSFileSystem\n");
 			// Initialize LittleFS
-			if (!LittleFS.begin(true, "")) return false;
+			if (!LittleFS.begin(true, "")) {
+				printf("[ustore] Failed to initialize LittleFSFileSystem!\n");
+				return false;
+			}
 	/*
 			// Ensure filesystem is writable and reformat if not
 			if (writeFile("/test", "test", 4) < 4) {

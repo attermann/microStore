@@ -233,7 +233,8 @@ void test_iterator_single_record() {
     reset_ram_fs();
     microStore::FileStore store;
     auto fs = make_ram_fs();
-    store.init(fs, "/test");
+    TEST_ASSERT_TRUE(fs);
+    TEST_ASSERT_TRUE(store.init(fs, "/test"));
 
     const char* val = "hello";
     store.put("mykey", val, 42u);

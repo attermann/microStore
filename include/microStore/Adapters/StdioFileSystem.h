@@ -207,6 +207,7 @@ protected:
 	#if defined(ESP32)
 			// Initialize LittleFS for POSIX file access
 			if (!LittleFS.begin(true, "")) {
+				printf("[ustore] Failed to initialize StdioFileSystem!\n");
 				return false;
 			}
 	#endif

@@ -34,17 +34,17 @@ namespace microStore {
 #define USTORE_MAX_VALUE_LEN 1024
 #endif
 
-#ifndef UFSKV_SEGMENT_SIZE
-//#define UFSKV_SEGMENT_SIZE (1024 * 1024)
-#define UFSKV_SEGMENT_SIZE (64 * 1024)
+#ifndef USTORE_SEGMENT_SIZE
+#define USTORE_SEGMENT_SIZE 65536
 #endif
 
-#ifndef UFSKV_MAX_SEGMENTS
-#define UFSKV_MAX_SEGMENTS 8
+#ifndef USTORE_MAX_SEGMENTS
+#define USTORE_MAX_SEGMENTS 8
 #endif
 
-#ifndef UFSKV_WRITE_BUFFER
-#define UFSKV_WRITE_BUFFER 4096
+#ifndef USTORE_WRITE_BUFFER
+//#define USTORE_WRITE_BUFFER 4096
+#define USTORE_WRITE_BUFFER 512
 #endif
 
 #ifndef USTORE_MAX_KEY_LEN
@@ -55,9 +55,17 @@ namespace microStore {
 #define USTORE_MAX_FILENAME_LEN 64
 #endif
 
-#ifndef UFSKV_COMPACT_RETRY_MS
-//#define UFSKV_COMPACT_RETRY_MS 5000   // ms between compact() retries after failure
-#define UFSKV_COMPACT_RETRY_MS 60000   // ms between compact() retries after failure
+#ifndef USTORE_COMPACT_RETRY_MS
+//#define USTORE_COMPACT_RETRY_MS 5000   // ms between compact() retries after failure
+#define USTORE_COMPACT_RETRY_MS 60000   // ms between compact() retries after failure
+#endif
+
+#ifndef USTORE_DEFAULT_TTL_SECS
+#define USTORE_DEFAULT_TTL_SECS 0
+#endif
+
+#ifndef USTORE_DEFAULT_MAX_RECS
+#define USTORE_DEFAULT_MAX_RECS 0
 #endif
 
 /* ---------------- CONSTANTS ---------------- */
@@ -106,13 +114,16 @@ public:
 
 	BasicFileStore() : BasicFileStore(Allocator{}) {}
 	explicit BasicFileStore(const Allocator& alloc)
-		: alloc_(alloc), index(map_alloc_type(alloc_)) { write_buf_pos = 0; }
+		: _alloc(alloc), _index(map_alloc_type(_alloc)) { write_buf_pos = 0; }
 
-	allocator_type get_allocator() const { return alloc_; }
+	inline allocator_type get_allocator() const { return _alloc; }
+
+	inline bool isValid() const { if (!_filesystem) return false; return true; }
+	inline operator bool() const { return isValid(); }
 
 	bool init(FileSystem& filesystem, const char* prefix)
 	{
-		fs = filesystem;
+		_filesystem = filesystem;
 		strncpy(base_prefix,prefix,sizeof(base_prefix));
 
 		recover_if_needed();
@@ -120,17 +131,26 @@ public:
 		if (!load_index())
 			rebuild_index_from_segments();
 
+		// Enforce max_recs at boot: prune excess entries and rewrite the
+		// persistent index so evicted keys don't reappear on the next reboot.
+		size_t pruned = prune_index_to_max_recs_();
+		if (pruned > 0) {
+			char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
+			_filesystem.remove(iname);
+			write_index_bulk();
+		}
+
 		open_index_for_append();
 
 		// Resume at the highest segment that exists on flash, not always seg 0.
 		// Without this, after reset current_segment stays 0 and new writes
 		// overwrite previously-live segments, losing all their records.
 		uint32_t resume_seg = 0;
-		for (uint32_t i = 0; i < UFSKV_MAX_SEGMENTS; i++)
+		for (uint32_t i = 0; i < USTORE_MAX_SEGMENTS; i++)
 		{
 			char name[USTORE_MAX_FILENAME_LEN];
 			segment_name(i, name);
-			File f = fs.open(name, File::ModeRead);
+			File f = _filesystem.open(name, File::ModeRead);
 			if (f) { f.close(); resume_seg = i; }
 		}
 
@@ -141,20 +161,22 @@ public:
 
 	void clear()
 	{
+        if (!isValid()) return;
+
 		char name[USTORE_MAX_FILENAME_LEN];
 
 		if (index_file) index_file.close();
 
-		for(uint32_t i=0;i<UFSKV_MAX_SEGMENTS;i++)
+		for(uint32_t i=0;i<USTORE_MAX_SEGMENTS;i++)
 		{
 			segment_name(i,name);
-			fs.remove(name);
+			_filesystem.remove(name);
 		}
 
 		index_name(name);
-		fs.remove(name);
+		_filesystem.remove(name);
 
-		index.clear();
+		_index.clear();
 		current_segment=0;
 		current_offset=0;
 		write_buf_pos=0;
@@ -167,6 +189,8 @@ public:
 
 	bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
 	{
+        if (!isValid()) return false;
+
 		if (key_len > USTORE_MAX_KEY_LEN) {
 			printf("[ustore] put: failed due to excessive key length: %u\n", key_len);
 			return false;
@@ -212,6 +236,12 @@ public:
 
 		index_insert(key, key_len, current_segment, offset, ts);
 
+		// Enforce max_recs: evict the oldest record(s) from the in-memory index
+		// when a new key pushes the count over the limit. Orphaned disk records
+		// will be reclaimed at the next compaction.
+		if (policy_max_recs > 0 && _index.size() > policy_max_recs)
+			prune_index_to_max_recs_();
+
 		persist_index_entry(key, key_len, current_segment, offset, ts);
 
 		current_offset += sizeof(hdr)+key_len+len+sizeof(c);
@@ -245,6 +275,8 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 
 	bool get(const uint8_t* key, uint8_t key_len, uint8_t* out, uint16_t* size)
 	{
+        if (!isValid()) return false;
+
 //printf("[ustore] get: fetching key %s with data size %u\n", bin_str(key, key_len), *size);
 		if (key_len > USTORE_MAX_KEY_LEN) {
 			printf("[ustore] get: failed due to excessive key length: %u\n", key_len);
@@ -259,10 +291,16 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 			return false;
 		}
 
+		if (is_ttl_expired_(e->timestamp)) {
+			index_remove(key, key_len);
+			printf("[ustore] get: key expired by TTL\n");
+			return false;
+		}
+
 		char name[USTORE_MAX_FILENAME_LEN];
 		segment_name(e->segment,name);
 
-		File f = fs.open(name, File::ModeRead);
+		File f = _filesystem.open(name, File::ModeRead);
 		if (!f) return false;
 
 		f.seek(e->offset, SeekModeSet);
@@ -329,6 +367,8 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 	bool remove(const uint8_t* key, uint8_t key_len)
 	{
+        if (!isValid()) return false;
+
 		if(key_len > USTORE_MAX_KEY_LEN) return false;
 
 		RecordHeader hdr;
@@ -373,10 +413,11 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 	bool exists(const uint8_t* key, uint8_t key_len)
 	{
+        if (!isValid()) return false;
 		if(key_len > USTORE_MAX_KEY_LEN) return false;
-
 		IndexValue* e = index_find(key, key_len);
 		if (!e) return false;
+		if (is_ttl_expired_(e->timestamp)) { index_remove(key, key_len); return false; }
 		return true;
 	}
 
@@ -394,19 +435,20 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 	inline size_t size()
 	{
-		return index.size();
+        if (!isValid()) return 0;
+		return _index.size();
 	}
 
 	/* -------- POLICY -------- */
 
 	inline void set_ttl_secs(uint32_t ttl_s)
 	{
-		policy_ttl_s_    = ttl_s;
+		policy_ttl_secs    = ttl_s;
 	}
 
 	inline void set_max_recs(uint32_t max_recs)
 	{
-		policy_max_recs_ = max_recs;
+		policy_max_recs = max_recs;
 	}
 
 	/* -------- DUMP INFO -------- */
@@ -422,12 +464,12 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		uint32_t total_dead_entries = 0;
 		uint32_t total_dead_bytes = 0;
 
-			for(uint32_t seg = 0; seg < UFSKV_MAX_SEGMENTS; seg++)
+			for(uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++)
 		{
 			char name[USTORE_MAX_FILENAME_LEN];
 			segment_name(seg, name);
 
-			File f = fs.open(name, File::ModeRead);
+			File f = _filesystem.open(name, File::ModeRead);
 			if (!f) break;  // segments are contiguous; first missing one ends the scan
 
 			uint32_t file_size = 0;
@@ -551,7 +593,7 @@ private:
 		KeyType, IndexValue, VectorHash, std::equal_to<KeyType>, map_alloc_type>;
 
 	KeyType make_key(const uint8_t* key, uint8_t key_len) const {
-		return KeyType(key, key + key_len, byte_alloc_type(alloc_));
+		return KeyType(key, key + key_len, byte_alloc_type(_alloc));
 	}
 
 public:
@@ -619,7 +661,7 @@ public:
 			char name[USTORE_MAX_FILENAME_LEN];
 			store_->segment_name(iv.segment, name);
 
-			File f = store_->fs.open(name, File::ModeRead);
+			File f = store_->_filesystem.open(name, File::ModeRead);
 			if (!f) { current_.value.clear(); return; }
 
 			f.seek((long)iv.offset, SeekModeSet);
@@ -642,11 +684,11 @@ public:
 
 	iterator begin() {
 		flush_buffer();   // ensure pending writes are visible before iterating
-		return iterator(this, index.begin(), index.end());
+		return iterator(this, _index.begin(), _index.end());
 	}
 
 	iterator end() {
-		return iterator(this, index.end(), index.end());
+		return iterator(this, _index.end(), _index.end());
 	}
 
 private:
@@ -659,7 +701,7 @@ private:
 
 		while(len)
 		{
-			size_t space = UFSKV_WRITE_BUFFER - write_buf_pos;
+			size_t space = USTORE_WRITE_BUFFER - write_buf_pos;
 			size_t n = (len < space) ? len : space;
 
 			memcpy(write_buf+write_buf_pos, p, n);
@@ -668,7 +710,7 @@ private:
 			p += n;
 			len -= n;
 
-			if(write_buf_pos == UFSKV_WRITE_BUFFER)
+			if(write_buf_pos == USTORE_WRITE_BUFFER)
 				flush_buffer();
 		}
 	}
@@ -684,20 +726,20 @@ private:
 		active_file.write(write_buf, write_buf_pos);
 		active_file.flush();
 		write_buf_pos = 0;
-		return false;
+		return true;
 	}
 
 	/* -------- INDEX -------- */
 
 	IndexValue* index_find(const uint8_t* key, uint8_t key_len)
 	{
-		auto it = index.find(make_key(key, key_len));
-		return (it != index.end()) ? &it->second : nullptr;
+		auto it = _index.find(make_key(key, key_len));
+		return (it != _index.end()) ? &it->second : nullptr;
 	}
 
 	void index_insert(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
 	{
-		IndexValue& iv = index[make_key(key, key_len)];
+		IndexValue& iv = _index[make_key(key, key_len)];
 		iv.segment   = seg;
 		iv.offset    = off;
 		iv.timestamp = ts;
@@ -705,7 +747,49 @@ private:
 
 	void index_remove(const uint8_t* key, uint8_t key_len)
 	{
-		index.erase(make_key(key, key_len));
+		_index.erase(make_key(key, key_len));
+	}
+
+	/* -------- POLICY HELPERS -------- */
+
+	bool is_ttl_expired_(uint32_t ts) const
+	{
+		return policy_ttl_secs > 0 && (ustore_time() - ts) >= policy_ttl_secs;
+	}
+
+	// Evict the oldest records (by timestamp) until _index.size() <= policy_max_recs.
+	// Returns the number of entries evicted.
+	// When to_evict == 1 (the common put() path), a simple O(n) scan is used to
+	// avoid heap allocation.  When to_evict > 1 (init / compact), a partial sort
+	// is used to evict all excess entries in a single pass.
+	size_t prune_index_to_max_recs_()
+	{
+		if (policy_max_recs == 0 || _index.size() <= policy_max_recs) return 0;
+
+		size_t to_evict = _index.size() - policy_max_recs;
+
+		if (to_evict == 1) {
+			// Fast path: single linear scan for the oldest entry.
+			auto oldest = _index.begin();
+			for (auto it = _index.begin(); it != _index.end(); ++it)
+				if (it->second.timestamp < oldest->second.timestamp) oldest = it;
+			_index.erase(oldest);
+		} else {
+			// Bulk path: collect (timestamp, key) pairs, partial-sort, then erase.
+			using KTSPair = std::pair<uint32_t, KeyType>;
+			using KTSAlloc = rebind_alloc<KTSPair>;
+			KTSAlloc kts_alloc(_alloc);
+			std::vector<KTSPair, KTSAlloc> candidates(kts_alloc);
+			candidates.reserve(_index.size());
+			for (auto& kv : _index)
+				candidates.push_back(std::make_pair(kv.second.timestamp, kv.first));
+			std::partial_sort(candidates.begin(), candidates.begin() + (long)to_evict, candidates.end(),
+				[](const KTSPair& a, const KTSPair& b){ return a.first < b.first; });
+			for (size_t i = 0; i < to_evict; i++)
+				_index.erase(candidates[i].second);
+		}
+
+		return to_evict;
 	}
 
 	/* -------- INDEX FILE -------- */
@@ -732,10 +816,10 @@ private:
 		char name[USTORE_MAX_FILENAME_LEN];
 		index_name(name);
 
-		File f = fs.open(name, File::ModeAppend);
+		File f = _filesystem.open(name, File::ModeAppend);
 		if (!f) return false;
 
-		for (auto& kv : index)
+		for (auto& kv : _index)
 		{
 			uint8_t  key_len = (uint8_t)kv.first.size();
 			uint32_t seg     = kv.second.segment;
@@ -759,7 +843,7 @@ private:
 		char name[USTORE_MAX_FILENAME_LEN];
 		index_name(name);
 
-		File f = fs.open(name, File::ModeRead);
+		File f = _filesystem.open(name, File::ModeRead);
 		if (!f) return false;
 
 		while(true)
@@ -795,7 +879,7 @@ private:
 	{
 		char name[USTORE_MAX_FILENAME_LEN];
 		index_name(name);
-		index_file = fs.open(name, File::ModeAppend);
+		index_file = _filesystem.open(name, File::ModeAppend);
 	}
 
 	const char* bin_str(const uint8_t* key, size_t len)
@@ -840,7 +924,7 @@ private:
 		segment_name(id,name);
 
 printf("[ustore] Opening active file: %s\n", name);
-		active_file = fs.open(name, File::ModeReadAppend);
+		active_file = _filesystem.open(name, File::ModeReadAppend);
 		if (!active_file) {
 			printf("[ustore] ERROR: Failed to open active file: %s\n", name);
 			return false;
@@ -853,7 +937,7 @@ printf("[ustore] Opening active file: %s\n", name);
 
 	bool rotate_segment_if_needed(uint32_t write_size)
 	{
-		if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < UFSKV_SEGMENT_SIZE)
+		if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < USTORE_SEGMENT_SIZE)
 			return true;
 
 printf("[ustore] Rotating segment...\n");
@@ -863,19 +947,19 @@ printf("[ustore] Rotating segment...\n");
 
 		current_segment++;
 
-		if (current_segment >= UFSKV_MAX_SEGMENTS) {
+		if (current_segment >= USTORE_MAX_SEGMENTS) {
 			if (compact_in_cooldown &&
-				(ustore_millis() - compact_cooldown_start_ms) < UFSKV_COMPACT_RETRY_MS)
+				(ustore_millis() - compact_cooldown_start_ms) < USTORE_COMPACT_RETRY_MS)
 			{
 				printf("[ustore] Compact skipped: cooldown active\n");
-				current_segment = UFSKV_MAX_SEGMENTS - 1;
+				current_segment = USTORE_MAX_SEGMENTS - 1;
 				open_segment(current_segment);
 				return false;
 			}
 			if (!compact()) {
 				compact_in_cooldown       = true;
 				compact_cooldown_start_ms = ustore_millis();
-				current_segment = UFSKV_MAX_SEGMENTS - 1;
+				current_segment = USTORE_MAX_SEGMENTS - 1;
 				open_segment(current_segment);
 				return false;
 			}
@@ -892,7 +976,7 @@ printf("[ustore] Rotating segment...\n");
 	void write_journal(uint32_t state)
 	{
 		char name[USTORE_MAX_FILENAME_LEN]; journal_name(name);
-		File f = fs.open(name, File::ModeWrite);
+		File f = _filesystem.open(name, File::ModeWrite);
 		if (!f) return;
 		Journal j; j.magic = JOURNAL_MAGIC; j.state = state;
 		f.write(&j, sizeof(j));
@@ -903,13 +987,13 @@ printf("[ustore] Rotating segment...\n");
 	void clear_journal()
 	{
 		char name[USTORE_MAX_FILENAME_LEN]; journal_name(name);
-		fs.remove(name);
+		_filesystem.remove(name);
 	}
 
 	void recover_if_needed()
 	{
 		char name[USTORE_MAX_FILENAME_LEN]; journal_name(name);
-		File f = fs.open(name, File::ModeRead);
+		File f = _filesystem.open(name, File::ModeRead);
 		if (!f) return;
 
 		Journal j;
@@ -917,7 +1001,7 @@ printf("[ustore] Rotating segment...\n");
 		f.close();
 
 		if (n != sizeof(j) || j.magic != JOURNAL_MAGIC) {
-			fs.remove(name);
+			_filesystem.remove(name);
 			return;
 		}
 
@@ -927,10 +1011,10 @@ printf("[ustore] Rotating segment...\n");
 		} else {
 			// COMPACTING: tmp may be partial — just discard it.
 			char tmp[USTORE_MAX_FILENAME_LEN]; snprintf(tmp, sizeof(tmp), "%s_compact.tmp", base_prefix);
-			fs.remove(tmp);
+			_filesystem.remove(tmp);
 		}
 
-		fs.remove(name);  // clear journal
+		_filesystem.remove(name);  // clear journal
 	}
 
 	/* -------- FINALIZE COMPACTION -------- */
@@ -941,18 +1025,18 @@ printf("[ustore] Rotating segment...\n");
 		char seg0[USTORE_MAX_FILENAME_LEN];     segment_name(0, seg0);
 
 		// Remove all existing segments, then rename tmp → seg0.
-		for (uint32_t i = 0; i < UFSKV_MAX_SEGMENTS; i++) {
+		for (uint32_t i = 0; i < USTORE_MAX_SEGMENTS; i++) {
 			char sname[USTORE_MAX_FILENAME_LEN]; segment_name(i, sname);
-			fs.remove(sname);
+			_filesystem.remove(sname);
 		}
-		if (!fs.rename(tmp_name, seg0)) {
-			fs.remove(tmp_name);
+		if (!_filesystem.rename(tmp_name, seg0)) {
+			_filesystem.remove(tmp_name);
 			return;
 		}
 
 		// Rebuild in-memory index by scanning seg0.
-		index.clear();
-		File f = fs.open(seg0, File::ModeRead);
+		_index.clear();
+		File f = _filesystem.open(seg0, File::ModeRead);
 		if (f) {
 			uint32_t scan_offset = 0;
 			uint8_t key_buf[USTORE_MAX_KEY_LEN];
@@ -978,7 +1062,7 @@ printf("[ustore] Rotating segment...\n");
 		// which flushes after every entry and would cause N × fsync delays on flash.
 		char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
 		if (index_file) index_file.close();
-		fs.remove(iname);
+		_filesystem.remove(iname);
 		write_index_bulk();
 		open_index_for_append();
 
@@ -994,13 +1078,13 @@ printf("[ustore] Rotating segment...\n");
 	void rebuild_index_from_segments()
 	{
 		printf("[ustore] Index missing — rebuilding from segment files...\n");
-		index.clear();
+		_index.clear();
 
-		for (uint32_t seg = 0; seg < UFSKV_MAX_SEGMENTS; seg++)
+		for (uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++)
 		{
 			char sname[USTORE_MAX_FILENAME_LEN];
 			segment_name(seg, sname);
-			File f = fs.open(sname, File::ModeRead);
+			File f = _filesystem.open(sname, File::ModeRead);
 			if (!f) continue;
 
 			uint32_t scan_offset = 0;
@@ -1028,12 +1112,13 @@ printf("[ustore] Rotating segment...\n");
 		// Persist the rebuilt index so the next boot uses the fast path.
 		char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
 		if (index_file) index_file.close();
-		fs.remove(iname);
+		_filesystem.remove(iname);
 		write_index_bulk();
 	}
 
 	/* -------- COMPACTION -------- */
 
+public:
 	bool compact()
 	{
 printf("[ustore] Compacting storage...\n");
@@ -1043,24 +1128,30 @@ printf("[ustore] Compacting storage...\n");
 
 		char tmp_name[USTORE_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), "%s_compact.tmp", base_prefix);
 printf("[ustore] Opening tmp file: %s\n", tmp_name);
-		File outf = fs.open(tmp_name, File::ModeWrite);
+		File outf = _filesystem.open(tmp_name, File::ModeWrite);
 		if (!outf) { clear_journal(); return false; }
 
 		// --- Phase 2: build per-segment sorted lists of live offsets ---
+
+		// Apply policies before building the live-record lists so that expired
+		// and excess records are excluded from the compaction output.
+		prune_index_to_max_recs_();
+
 		struct LiveRec { uint32_t offset; KeyType key; };
 		using LiveRecVec = std::vector<LiveRec, rebind_alloc<LiveRec>>;
-		rebind_alloc<LiveRec> lr_alloc(alloc_);
-		LiveRecVec per_seg[UFSKV_MAX_SEGMENTS];
+		rebind_alloc<LiveRec> lr_alloc(_alloc);
+		LiveRecVec per_seg[USTORE_MAX_SEGMENTS];
 		for (auto& v : per_seg) { v = LiveRecVec(lr_alloc); }
 
-		for (auto& kv : index) {
+		for (auto& kv : _index) {
+			if (is_ttl_expired_(kv.second.timestamp)) continue;
 			uint32_t seg = kv.second.segment;
-			if (seg < UFSKV_MAX_SEGMENTS) {
+			if (seg < USTORE_MAX_SEGMENTS) {
 				LiveRec lr; lr.offset = kv.second.offset; lr.key = kv.first;
 				per_seg[seg].push_back(lr);
 			}
 		}
-		for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS; s++) {
+		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
 			std::sort(per_seg[s].begin(), per_seg[s].end(),
 					[](const LiveRec& a, const LiveRec& b){ return a.offset < b.offset; });
 		}
@@ -1071,12 +1162,12 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 		static uint8_t val_buf[USTORE_MAX_VALUE_LEN];
 		bool write_ok = true;
 
-		for (uint32_t s = 0; s < UFSKV_MAX_SEGMENTS && write_ok; s++) {
+		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS && write_ok; s++) {
 			if (per_seg[s].empty()) continue;
 
 			char src_name[USTORE_MAX_FILENAME_LEN]; segment_name(s, src_name);
 printf("[ustore] Opening src file: %s\n", src_name);
-			File src = fs.open(src_name, File::ModeRead);
+			File src = _filesystem.open(src_name, File::ModeRead);
 			if (!src) continue;
 
 			for (size_t i = 0; i < per_seg[s].size(); i++) {
@@ -1108,7 +1199,7 @@ printf("[ustore] Closing tmp file: %s\n", tmp_name);
 
 		if (!write_ok) {
 			printf("[ustore] Compact aborted: storage full, segments preserved\n");
-			fs.remove(tmp_name);
+			_filesystem.remove(tmp_name);
 			clear_journal();   // journal is still COMPACTING — safe to discard
 			return false;
 		}
@@ -1125,7 +1216,7 @@ printf("[ustore] Closing tmp file: %s\n", tmp_name);
 
 private:
 
-	FileSystem fs;
+	FileSystem _filesystem;
 
 	char base_prefix[32];
 
@@ -1138,14 +1229,14 @@ private:
 	bool compact_in_cooldown = false;
 	uint32_t compact_cooldown_start_ms = 0;
 
-	uint32_t policy_ttl_s_  = 0; // 0 = TTL disabled (seconds)
-	uint32_t policy_max_recs_ = 0; // 0 = max-records disabled
+	uint32_t policy_ttl_secs = USTORE_DEFAULT_TTL_SECS; // 0 = TTL disabled (seconds)
+	uint32_t policy_max_recs = USTORE_DEFAULT_MAX_RECS; // 0 = max-records disabled
 
-	uint8_t write_buf[UFSKV_WRITE_BUFFER];
+	uint8_t write_buf[USTORE_WRITE_BUFFER];
 	size_t write_buf_pos;
 
-	Allocator alloc_;
-	IndexMap index;
+	Allocator _alloc;
+	IndexMap _index;
 };
 
 

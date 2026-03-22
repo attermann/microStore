@@ -47,9 +47,12 @@ public:
 
     BasicHeapStore() : BasicHeapStore(Allocator{}) {}
     explicit BasicHeapStore(const Allocator& alloc)
-        : alloc_(alloc), data_(map_alloc_type(alloc_)) {}
+        : _alloc(alloc), data_(map_alloc_type(_alloc)) {}
 
-    allocator_type get_allocator() const { return alloc_; }
+    allocator_type get_allocator() const { return _alloc; }
+
+    inline bool isValid() const { return true; }
+	inline operator bool() const { return isValid(); }
 
     bool init() { return true; }
 
@@ -57,6 +60,8 @@ public:
 
     bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ts = ustore_time())
     {
+        if (!isValid()) return false;
+
         if (key_len > USTORE_MAX_KEY_LEN) {
             printf("[heapstore] put failed due to excessive key length: %u\n", key_len);
             return false;
@@ -68,18 +73,18 @@ public:
 
         KeyType k = make_key(key, key_len);
 
-        if (policy_ttl_s_ > 0) {
+        if (policy_ttl_secs > 0) {
             uint32_t now = ustore_time();
             for (auto it = data_.begin(); it != data_.end(); ) {
-                if (now - it->second.timestamp >= policy_ttl_s_)
+                if (now - it->second.timestamp >= policy_ttl_secs)
                     it = data_.erase(it);
                 else
                     ++it;
             }
         }
 
-        if (policy_max_recs_ > 0 && data_.count(k) == 0) {
-            while (data_.size() >= policy_max_recs_)
+        if (policy_max_recs > 0 && data_.count(k) == 0) {
+            while (data_.size() >= policy_max_recs)
                 data_.erase(data_.begin());
         }
 
@@ -110,6 +115,8 @@ public:
 
     bool get(const uint8_t* key, uint8_t key_len, void* out, uint16_t* size)
     {
+        if (!isValid()) return false;
+
         if (key_len > USTORE_MAX_KEY_LEN) {
             printf("[heapstore] get failed due to excessive key length: %u\n", key_len);
             return false;
@@ -117,6 +124,14 @@ public:
 
         auto it = data_.find(make_key(key, key_len));
         if (it == data_.end()) return false;
+
+        if (policy_ttl_secs > 0) {
+            uint32_t now = ustore_time();
+            if (now - it->second.timestamp >= policy_ttl_secs) {
+                data_.erase(it);
+                return false;
+            }
+        }
 
         const std::vector<uint8_t>& v = it->second.value;
 
@@ -153,6 +168,7 @@ public:
 
     bool remove(const uint8_t* key, uint8_t key_len)
     {
+        if (!isValid()) return false;
         if (key_len > USTORE_MAX_KEY_LEN) return false;
         data_.erase(make_key(key, key_len));
         return true;
@@ -172,6 +188,7 @@ public:
 
     bool exists(const uint8_t* key, uint8_t key_len)
     {
+        if (!isValid()) return false;
         if (key_len > USTORE_MAX_KEY_LEN) return false;
         return data_.count(make_key(key, key_len)) > 0;
     }
@@ -188,22 +205,28 @@ public:
 
     /* -------- SIZE -------- */
 
-    inline size_t size() const { return data_.size(); }
+    inline size_t size() const {
+        if (!isValid()) return 0;
+        return data_.size();
+    }
 
     /* -------- CLEAR -------- */
 
-    void clear() { data_.clear(); }
+    void clear() {
+        if (!isValid()) return;
+        data_.clear();
+    }
 
     /* -------- POLICY -------- */
 
 	inline void set_ttl_secs(uint32_t ttl_s)
 	{
-		policy_ttl_s_    = ttl_s;
+		policy_ttl_secs    = ttl_s;
 	}
 
 	inline void set_max_recs(uint32_t max_recs)
 	{
-		policy_max_recs_ = max_recs;
+		policy_max_recs = max_recs;
 	}
 
     /* -------- DUMP INFO -------- */
@@ -238,7 +261,7 @@ private:
     using DataMap        = std::map<KeyType, HeapEntry, std::less<KeyType>, map_alloc_type>;
 
     KeyType make_key(const uint8_t* key, uint8_t key_len) const {
-        return KeyType(key, key + key_len, byte_alloc_type(alloc_));
+        return KeyType(key, key + key_len, byte_alloc_type(_alloc));
     }
 
 public:
@@ -311,11 +334,11 @@ public:
 
 private:
 
-    Allocator alloc_;
+    Allocator _alloc;
     DataMap data_;
 
-    uint32_t policy_ttl_s_    = 0;
-    uint32_t policy_max_recs_ = 0;
+    uint32_t policy_ttl_secs    = 0;
+    uint32_t policy_max_recs = 0;
 };
 
 using HeapStore = BasicHeapStore<>;

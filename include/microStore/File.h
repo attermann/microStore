@@ -85,12 +85,13 @@ public:
 
 	inline virtual File& operator = (const File& obj) { _impl = obj._impl; _crc = obj._crc; return *this; }
 	inline File& operator = (FileImpl* impl) { _impl.reset(impl); return *this; }
-	inline operator bool() const { return (_impl.get() != nullptr && _impl->isValid()); }
 	inline bool operator < (const File& obj) const { return _impl.get() < obj._impl.get(); }
 	inline bool operator > (const File& obj) const { return _impl.get() > obj._impl.get(); }
 	inline bool operator == (const File& obj) const { return _impl.get() == obj._impl.get(); }
 	inline bool operator != (const File& obj) const { return _impl.get() != obj._impl.get(); }
 	inline FileImpl* get() { return _impl.get(); }
+	inline bool isValid() const { if (_impl.get() == nullptr) return false; return _impl->isValid(); }
+	inline operator bool() const { return isValid(); }
 	inline void clear() { _impl.reset(); }
 
 public:
@@ -124,23 +125,6 @@ public:
 	inline long seek(uint32_t pos) { return seek(pos, SeekModeSet); }
 	inline void flush() { assert(_impl); _impl->flush(); }
 
-	// Helper
-	inline bool isValid() const { if (!_impl) return false; return _impl->isValid(); }
-
-	//NEW size_t read(uint8_t *buf, size_t size) {
-	//NEW }
-	//NEW size_t readBytes(char *buffer, size_t length) {
-	//NEW 	return read((uint8_t *)buffer, length);
-	//NEW }
-
-	//NEW boolean isDirectory(void);
-	//NEW boolean seekDir(long position);
-	//NEW File openNextFile(const char *mode = FILE_READ);
-	//NEW String getNextFileName(void);
-	//NEW String getNextFileName(boolean *isDir);
-	//NEW void rewindDirectory(void);
-
-	// getters/setters
 protected:
 public:
 
