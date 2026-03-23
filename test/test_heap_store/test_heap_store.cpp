@@ -97,9 +97,9 @@ void test_heap_store_iterator() {
     HeapStore store;
     store.init();
 
-    store.put("alpha", "AAA", 3u, 1u);
-    store.put("beta",  "BB",  2u, 2u);
-    store.put("gamma", "C",   1u, 3u);
+    store.put("alpha", "AAA", 3u, /*ttl=*/0, 1u);
+    store.put("beta",  "BB",  2u, /*ttl=*/0, 2u);
+    store.put("gamma", "C",   1u, /*ttl=*/0, 3u);
 
     std::map<std::string, std::string> seen;
     for (auto& e : store) {
@@ -122,16 +122,16 @@ void test_heap_store_policy_max_recs() {
     store.set_ttl_secs(0);
     store.set_max_recs(2);
 
-    store.put("first",  "1", 1u, 1u);
-    store.put("second", "2", 1u, 2u);
+    store.put("first",  "1", 1u, /*ttl=*/0, 1u);
+    store.put("second", "2", 1u, /*ttl=*/0, 2u);
     TEST_ASSERT_EQUAL(2u, store.size());
 
     // Adding a third key evicts the smallest (first alphabetically — "first")
-    store.put("third", "3", 1u, 3u);
+    store.put("third", "3", 1u, /*ttl=*/0, 3u);
     TEST_ASSERT_EQUAL(2u, store.size());
 
     // Overwriting an existing key does not evict
-    store.put("second", "updated", 7u, 4u);
+    store.put("second", "updated", 7u, /*ttl=*/0, 4u);
     TEST_ASSERT_EQUAL(2u, store.size());
     TEST_ASSERT_TRUE(store.exists("second"));
 }
@@ -144,7 +144,7 @@ void test_heap_store_ttl_expires_on_get() {
     store.set_ttl_secs(60);
 
     // Store a record with a very old timestamp (epoch second 1).
-    store.put("k", "hello", 5u, /*ts=*/1u);
+    store.put("k", "hello", 5u, /*ttl=*/0, /*ts=*/1u);
     TEST_ASSERT_EQUAL(1u, store.size());
 
     // get() must detect expiry, evict the record, and return false.
@@ -162,8 +162,8 @@ void test_heap_store_ttl_keeps_fresh() {
     store.init();
     store.set_ttl_secs(3600);  // 1-hour TTL
 
-    uint32_t now = microStore::ustore_time();
-    store.put("k", "world", 5u, now);
+    uint32_t now = microStore::time();
+    store.put("k", "world", 5u, /*ttl=*/0, now);
 
     char buf[32];
     uint16_t sz = sizeof(buf);
@@ -178,14 +178,14 @@ void test_heap_store_ttl_sweep_on_put() {
 
     // Insert two records with very old timestamps while TTL is still disabled,
     // so no sweep occurs and both records are retained.
-    store.put("old1", "a", 1u, /*ts=*/1u);
-    store.put("old2", "b", 1u, /*ts=*/2u);
+    store.put("old1", "a", 1u, /*ttl=*/0, /*ts=*/1u);
+    store.put("old2", "b", 1u, /*ttl=*/0, /*ts=*/2u);
     TEST_ASSERT_EQUAL(2u, store.size());
 
     // Enable TTL and trigger a new put() — the sweep must remove old1/old2.
     store.set_ttl_secs(60);
-    uint32_t now = microStore::ustore_time();
-    store.put("fresh", "c", 1u, now);
+    uint32_t now = microStore::time();
+    store.put("fresh", "c", 1u, /*ttl=*/0, now);
 
     TEST_ASSERT_EQUAL(1u, store.size());
     TEST_ASSERT_FALSE(store.exists("old1"));
@@ -197,8 +197,8 @@ void test_heap_store_ttl_zero_disables() {
     HeapStore store;
     store.init();
     // TTL=0 is the default; no expiration should occur regardless of timestamp.
-    store.put("k", "v", 1u, /*ts=*/1u);
-    store.put("other", "x", 1u, /*ts=*/1u);  // trigger any sweep logic
+    store.put("k", "v", 1u, /*ttl=*/0, /*ts=*/1u);
+    store.put("other", "x", 1u, /*ttl=*/0, /*ts=*/1u);  // trigger any sweep logic
 
     TEST_ASSERT_EQUAL(2u, store.size());
     TEST_ASSERT_TRUE(store.exists("k"));
@@ -272,8 +272,8 @@ void test_heap_store_iterator_timestamps() {
     HeapStore store;
     store.init();
 
-    store.put("a", "A", 1u, /*ts=*/42u);
-    store.put("b", "B", 1u, /*ts=*/99u);
+    store.put("a", "A", 1u, /*ttl=*/0, /*ts=*/42u);
+    store.put("b", "B", 1u, /*ttl=*/0, /*ts=*/99u);
 
     std::map<std::string, uint32_t> ts_map;
     for (auto& e : store) {
@@ -304,15 +304,15 @@ void test_heap_store_ttl_and_max_recs() {
     store.set_ttl_secs(60);
     store.set_max_recs(3);
 
-    uint32_t now = microStore::ustore_time();
+    uint32_t now = microStore::time();
 
     // Two fresh records, one expired.
-    store.put("fresh1", "a", 1u, now);
-    store.put("fresh2", "b", 1u, now);
-    store.put("old",    "c", 1u, /*ts=*/1u);
+    store.put("fresh1", "a", 1u, /*ttl=*/0, now);
+    store.put("fresh2", "b", 1u, /*ttl=*/0, now);
+    store.put("old",    "c", 1u, /*ttl=*/0, /*ts=*/1u);
 
     // A fourth put triggers TTL sweep (removes "old"), then max_recs check.
-    store.put("fresh3", "d", 1u, now);
+    store.put("fresh3", "d", 1u, /*ttl=*/0, now);
 
     // "old" swept by TTL; fresh1/fresh2/fresh3 all within max_recs=3.
     TEST_ASSERT_EQUAL(3u, store.size());

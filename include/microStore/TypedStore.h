@@ -34,12 +34,12 @@ public:
 	inline bool isValid() const { return store.isValid(); }
 	inline operator bool() const { return isValid(); }
 
-    bool put(const Key& key, const Value& value)
+    bool put(const Key& key, const Value& value, uint32_t ttl = 0)
     {
         if (!isValid()) return false;
         auto k = KeyCodec::encode(key);
         auto v = ValueCodec::encode(value);
-        return store.put(k, v);
+        return store.put(k, v, ttl);
     }
 
     bool get(const Key& key, Value& value)

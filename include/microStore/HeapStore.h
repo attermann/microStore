@@ -58,7 +58,7 @@ public:
 
     /* -------- PUT -------- */
 
-    bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ts = ustore_time())
+    bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
     {
         if (!isValid()) return false;
 
@@ -73,14 +73,13 @@ public:
 
         KeyType k = make_key(key, key_len);
 
-        if (policy_ttl_secs > 0) {
-            uint32_t now = ustore_time();
-            for (auto it = data_.begin(); it != data_.end(); ) {
-                if (now - it->second.timestamp >= policy_ttl_secs)
-                    it = data_.erase(it);
-                else
-                    ++it;
-            }
+        uint32_t now = microStore::time();
+        for (auto it = data_.begin(); it != data_.end(); ) {
+            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : policy_ttl_secs;
+            if (effective > 0 && now - it->second.timestamp >= effective)
+                it = data_.erase(it);
+            else
+                ++it;
         }
 
         if (policy_max_recs > 0 && data_.count(k) == 0) {
@@ -92,23 +91,24 @@ public:
         e.value.assign(static_cast<const uint8_t*>(data),
                        static_cast<const uint8_t*>(data) + len);
         e.timestamp = ts;
+        e.ttl = ttl;
 
         return true;
     }
 
-    inline bool put(const char* key, const void* data, uint16_t len, uint32_t ts = ustore_time())
+    inline bool put(const char* key, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
     {
-        return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ts);
+        return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ttl, ts);
     }
 
-    inline bool put(const std::vector<uint8_t>& key, const void* data, uint16_t len, uint32_t ts = ustore_time())
+    inline bool put(const std::vector<uint8_t>& key, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
     {
-        return put(key.data(), (uint8_t)key.size(), data, len, ts);
+        return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
     }
 
-    inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ts = ustore_time())
+    inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time())
     {
-        return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ts);
+        return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ttl, ts);
     }
 
     /* -------- GET -------- */
@@ -125,9 +125,9 @@ public:
         auto it = data_.find(make_key(key, key_len));
         if (it == data_.end()) return false;
 
-        if (policy_ttl_secs > 0) {
-            uint32_t now = ustore_time();
-            if (now - it->second.timestamp >= policy_ttl_secs) {
+        {
+            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : policy_ttl_secs;
+            if (effective > 0 && microStore::time() - it->second.timestamp >= effective) {
                 data_.erase(it);
                 return false;
             }
@@ -254,6 +254,7 @@ private:
     struct HeapEntry {
         std::vector<uint8_t> value;
         uint32_t timestamp = 0;
+        uint32_t ttl = 0;
     };
 
     using MapPairType    = std::pair<const KeyType, HeapEntry>;
@@ -272,6 +273,7 @@ public:
         std::vector<uint8_t> key;
         std::vector<uint8_t> value;
         uint32_t timestamp;
+        uint32_t ttl;
     };
 
     /* -------- ITERATOR -------- */
@@ -320,6 +322,7 @@ public:
             current_.key.assign(pos_->first.begin(), pos_->first.end());
             current_.value     = pos_->second.value;
             current_.timestamp = pos_->second.timestamp;
+            current_.ttl       = pos_->second.ttl;
         }
 
         map_iter pos_;

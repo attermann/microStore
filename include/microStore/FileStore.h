@@ -61,7 +61,7 @@ namespace microStore {
 #endif
 
 #ifndef USTORE_COMPACT_THRESHOLD
-#define USTORE_COMPACT_THRESHOLD 50  // % dead records that trigger auto-compact (0 = disabled)
+#define USTORE_COMPACT_THRESHOLD 25  // % dead records that trigger auto-compact (0 = disabled)
 #endif
 
 #ifndef USTORE_DEFAULT_TTL_SECS
@@ -102,6 +102,7 @@ struct RecordHeader
 	uint8_t  key_len;     // length of the key
 	uint16_t length;      // lenght of the value
 	uint32_t timestamp;   // timestamp at record insertion
+	uint32_t ttl;         // per-record TTL in seconds; 0 = use global policy
 	uint32_t crc;         // integrity check — MUST be last
 };
 
@@ -124,6 +125,12 @@ public:
 	BasicFileStore() : BasicFileStore(Allocator{}) {}
 	explicit BasicFileStore(const Allocator& alloc)
 		: _alloc(alloc), _index(map_alloc_type(_alloc)) { write_buf_pos = 0; }
+
+	~BasicFileStore()
+	{
+		if (isValid())
+			flush_buffer();
+	}
 
 	inline allocator_type get_allocator() const { return _alloc; }
 
@@ -197,7 +204,7 @@ public:
 
 	/* -------- PUT -------- */
 
-	bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
+	bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
 	{
         if (!isValid()) return false;
 
@@ -220,6 +227,7 @@ public:
 		hdr.magic = MAGIC_RECORD;
 		hdr.key_len = key_len;
 		hdr.timestamp = ts;
+		hdr.ttl = ttl;
 		hdr.length = len;
 		hdr.flags = 0;
 
@@ -244,8 +252,10 @@ public:
 			return false;
 		}
 
+		// If an existing record was updated then increment _dead_since_compact
 		if (index_find(key, key_len)) _dead_since_compact++;
-		index_insert(key, key_len, current_segment, offset, ts);
+
+		index_insert(key, key_len, current_segment, offset, ts, ttl);
 
 		// Enforce max_recs: evict the oldest record(s) from the in-memory index
 		// when a new key pushes the count over the limit. Orphaned disk records
@@ -253,35 +263,35 @@ public:
 		if (policy_max_recs > 0 && _index.size() > policy_max_recs)
 			prune_index_to_max_recs_();
 
-		persist_index_entry(key, key_len, current_segment, offset, ts);
+		persist_index_entry(key, key_len, current_segment, offset, ts, ttl);
 
 		current_offset += sizeof(hdr)+key_len+len+sizeof(c);
 
-		compact_if_threshold_();
+		compact_if_threshold();
 
-printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, key_len), len);
+printf("[ustore] put: wrote key %s with data length %u\n", bin_str(key, key_len), len);
 //printf("[ustore] put: %s\n", bin_str((uint8_t*)data, len));
 		return true;
 	}
 
-	inline bool put(const char* key, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
+	inline bool put(const char* key, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
 	{
-		return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ts);
+		return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ttl, ts);
 	}
 
-	inline bool put(const char* key, const char* data, uint32_t ts = ustore_time())
+	inline bool put(const char* key, const char* data, uint32_t ttl = 0, uint32_t ts = microStore::time())
 	{
-		return put((const uint8_t*)key, (uint8_t)strlen(key), (const uint8_t*)data, (uint16_t)strlen(data), ts);
+		return put((const uint8_t*)key, (uint8_t)strlen(key), (const uint8_t*)data, (uint16_t)strlen(data), ttl, ts);
 	}
 
-	inline bool put(const std::vector<uint8_t>& key, const uint8_t* data, uint16_t len, uint32_t ts = ustore_time())
+	inline bool put(const std::vector<uint8_t>& key, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time())
 	{
-		return put(key.data(), (uint8_t)key.size(), data, len, ts);
+		return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
 	}
 
-	inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ts = ustore_time())
+	inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time())
 	{
-		return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ts);
+		return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ttl, ts);
 	}
 
 	/* -------- GET -------- */
@@ -304,7 +314,7 @@ printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, ke
 			return false;
 		}
 
-		if (is_ttl_expired_(e->timestamp)) {
+		if (is_ttl_expired_(e->timestamp, e->ttl)) {
 			index_remove(key, key_len);
 			printf("[ustore] get: key expired by TTL\n");
 			return false;
@@ -403,14 +413,16 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 		flush_buffer();  // ensure tombstone is on flash before committing index entry
 
+		// If an existing record was removed then increment _dead_since_compact
 		if (index_find(key, key_len)) _dead_since_compact++;
+
 		index_remove(key, key_len);
 
 		persist_index_entry(key, key_len, 0xFFFFFFFF, 0);
 
 		current_offset += sizeof(RecordHeader) + key_len + sizeof(RecordCommit);
 
-		compact_if_threshold_();
+		compact_if_threshold();
 
 		return true;
 	}
@@ -433,7 +445,7 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		if(key_len > USTORE_MAX_KEY_LEN) return false;
 		IndexValue* e = index_find(key, key_len);
 		if (!e) return false;
-		if (is_ttl_expired_(e->timestamp)) { index_remove(key, key_len); return false; }
+		if (is_ttl_expired_(e->timestamp, e->ttl)) { index_remove(key, key_len); return false; }
 		return true;
 	}
 
@@ -586,6 +598,7 @@ private:
 		uint32_t segment;
 		uint32_t offset;
 		uint32_t timestamp;
+		uint32_t ttl;
 	};
 
 	template<typename T>
@@ -610,6 +623,7 @@ public:
 		std::vector<uint8_t> key;
 		std::vector<uint8_t> value;
 		uint32_t timestamp;
+		uint32_t ttl;
 	};
 
 	/* -------- ITERATOR -------- */
@@ -672,6 +686,7 @@ public:
 			iv_                = pos_->second;
 			current_.key.assign(pos_->first.begin(), pos_->first.end());
 			current_.timestamp = iv_.timestamp;
+			current_.ttl       = iv_.ttl;
 			current_.value.clear();
 			value_loaded_      = false;
 		}
@@ -761,12 +776,13 @@ private:
 		return (it != _index.end()) ? &it->second : nullptr;
 	}
 
-	void index_insert(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
+	void index_insert(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0, uint32_t ttl = 0)
 	{
 		IndexValue& iv = _index[make_key(key, key_len)];
 		iv.segment   = seg;
 		iv.offset    = off;
 		iv.timestamp = ts;
+		iv.ttl       = ttl;
 	}
 
 	void index_remove(const uint8_t* key, uint8_t key_len)
@@ -776,9 +792,10 @@ private:
 
 	/* -------- POLICY HELPERS -------- */
 
-	bool is_ttl_expired_(uint32_t ts) const
+	bool is_ttl_expired_(uint32_t ts, uint32_t record_ttl) const
 	{
-		return policy_ttl_secs > 0 && (ustore_time() - ts) >= policy_ttl_secs;
+		uint32_t effective_ttl = (record_ttl > 0) ? record_ttl : policy_ttl_secs;
+		return effective_ttl > 0 && microStore::time() > ts && (microStore::time() - ts) >= effective_ttl;
 	}
 
 	// Evict the oldest records (by timestamp) until _index.size() <= policy_max_recs.
@@ -809,9 +826,12 @@ private:
 				candidates.push_back(std::make_pair(kv.second.timestamp, kv.first));
 			std::partial_sort(candidates.begin(), candidates.begin() + (long)to_evict, candidates.end(),
 				[](const KTSPair& a, const KTSPair& b){ return a.first < b.first; });
-			for (size_t i = 0; i < to_evict; i++)
+			for (size_t i = 0; i < to_evict; i++) {
 				_index.erase(candidates[i].second);
+			}
 		}
+		// Record(s) evicted so increment _dead_since_compact
+		_dead_since_compact += to_evict;
 printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 
 		return to_evict;
@@ -819,7 +839,7 @@ printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 
 	/* -------- INDEX FILE -------- */
 
-	bool persist_index_entry(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0)
+	bool persist_index_entry(const uint8_t* key, uint8_t key_len, uint32_t seg, uint32_t off, uint32_t ts = 0, uint32_t ttl = 0)
 	{
 		if (!index_file) {
 			printf("[ustore] ERROR: Index file is not valid\n");
@@ -831,6 +851,7 @@ printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 		index_file.write(&seg, 4);
 		index_file.write(&off, 4);
 		index_file.write(&ts, 4);
+		index_file.write(&ttl, 4);
 		index_file.flush();  // explicit fsync — guarantees entry reaches flash
 
 		return true;
@@ -851,11 +872,14 @@ printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 			uint32_t off     = kv.second.offset;
 			uint32_t ts      = kv.second.timestamp;
 
+			uint32_t ttl     = kv.second.ttl;
+
 			f.write(&key_len, 1);
 			f.write(kv.first.data(), key_len);
 			f.write(&seg, 4);
 			f.write(&off, 4);
 			f.write(&ts, 4);
+			f.write(&ttl, 4);
 		}
 
 		f.flush();
@@ -885,12 +909,14 @@ printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
 			if(f.read(&off, 4) != 4) break;
 			uint32_t ts = 0;
 			if(f.read(&ts, 4) != 4) break;
+			uint32_t ttl = 0;
+			if(f.read(&ttl, 4) != 4) break;
 
 			// seg==0xFFFFFFFF is a deletion sentinel written by remove()
 			if(seg==0xFFFFFFFF)
 				index_remove(key, key_len);
 			else
-				index_insert(key, key_len, seg, off, ts);
+				index_insert(key, key_len, seg, off, ts, ttl);
 		}
 
 		f.close();
@@ -974,7 +1000,7 @@ printf("[ustore] Rotating segment...\n");
 
 		if (current_segment >= USTORE_MAX_SEGMENTS) {
 			if (compact_in_cooldown &&
-				(ustore_millis() - compact_cooldown_start_ms) < USTORE_COMPACT_RETRY_MS)
+				(microStore::millis() - compact_cooldown_start_ms) < USTORE_COMPACT_RETRY_MS)
 			{
 				printf("[ustore] Compact skipped: cooldown active\n");
 				current_segment = USTORE_MAX_SEGMENTS - 1;
@@ -983,7 +1009,7 @@ printf("[ustore] Rotating segment...\n");
 			}
 			if (!compact()) {
 				compact_in_cooldown       = true;
-				compact_cooldown_start_ms = ustore_millis();
+				compact_cooldown_start_ms = microStore::millis();
 				current_segment = USTORE_MAX_SEGMENTS - 1;
 				open_segment(current_segment);
 				return false;
@@ -1019,13 +1045,19 @@ printf("[ustore] Rotating segment...\n");
 		_filesystem.remove(name);
 	}
 
-	void compact_if_threshold_()
+	void compact_if_threshold()
 	{
 #if USTORE_COMPACT_THRESHOLD > 0
 		uint32_t total = (uint32_t)_index.size() + _dead_since_compact;
 		if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
 printf("[ustore] Compaction triggered by deleted threshold\n");
-			compact();
+			if (compact()) {
+				// After threshold-triggered compaction, seg0 holds the compacted data.
+				// Open seg1 for new writes, mirroring what rotate_segment_if_needed() does
+				// after a rotation-triggered compaction.
+				current_segment = 1;
+				open_segment(current_segment);
+			}
 		}
 #endif
 	}
@@ -1109,7 +1141,7 @@ printf("[ustore] Compaction triggered by deleted threshold\n");
 				if (f.read(&c, sizeof(c)) != sizeof(c)) break;
 				if (c.magic != MAGIC_COMMIT) break;
 				if (!(hdr.flags & FLAG_DELETE))
-					index_insert(key_buf, hdr.key_len, 0, scan_offset, hdr.timestamp);
+					index_insert(key_buf, hdr.key_len, 0, scan_offset, hdr.timestamp, hdr.ttl);
 				scan_offset += sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
 			}
 			f.close();
@@ -1161,7 +1193,7 @@ printf("[ustore] Compaction triggered by deleted threshold\n");
 				if (hdr.flags & FLAG_DELETE)
 					index_remove(key_buf, hdr.key_len);
 				else
-					index_insert(key_buf, hdr.key_len, seg, scan_offset, hdr.timestamp);
+					index_insert(key_buf, hdr.key_len, seg, scan_offset, hdr.timestamp, hdr.ttl);
 				scan_offset += sizeof(hdr) + hdr.key_len + hdr.length + sizeof(c);
 			}
 			f.close();
@@ -1195,23 +1227,33 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 		// and excess records are excluded from the compaction output.
 		prune_index_to_max_recs_();
 
-		struct LiveRec { uint32_t offset; KeyType key; };
+		struct LiveRec {
+			uint32_t offset;
+			KeyType key;
+		};
 		using LiveRecVec = std::vector<LiveRec, rebind_alloc<LiveRec>>;
 		rebind_alloc<LiveRec> lr_alloc(_alloc);
 		LiveRecVec per_seg[USTORE_MAX_SEGMENTS];
-		for (auto& v : per_seg) { v = LiveRecVec(lr_alloc); }
+		for (auto& v : per_seg) {
+			v = LiveRecVec(lr_alloc);
+		}
 
 		for (auto& kv : _index) {
-			if (is_ttl_expired_(kv.second.timestamp)) continue;
+printf("[ustore] Calling is_ttl_expired_ with ttl: %u, ts: %u, now: %u\n", kv.second.ttl, kv.second.timestamp, microStore::time());
+			if (is_ttl_expired_(kv.second.timestamp, kv.second.ttl)) continue;
 			uint32_t seg = kv.second.segment;
 			if (seg < USTORE_MAX_SEGMENTS) {
-				LiveRec lr; lr.offset = kv.second.offset; lr.key = kv.first;
+				LiveRec lr;
+				lr.offset = kv.second.offset;
+				lr.key = kv.first;
+printf("[ustore] Pushing segment: %u, offset: %u\n", seg, lr.offset);
 				per_seg[seg].push_back(lr);
 			}
 		}
 		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
-			std::sort(per_seg[s].begin(), per_seg[s].end(),
-					[](const LiveRec& a, const LiveRec& b){ return a.offset < b.offset; });
+			std::sort(per_seg[s].begin(), per_seg[s].end(), [](const LiveRec& a, const LiveRec& b) {
+				return a.offset < b.offset;
+			});
 		}
 
 		// --- Phase 3: process segments one at a time ---
@@ -1233,6 +1275,7 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 
 		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
 			char src_name[USTORE_MAX_FILENAME_LEN]; segment_name(s, src_name);
+printf("[ustore] Processing segment: %u, size: %lu\n", s, per_seg[s].size());
 
 			if (!per_seg[s].empty()) {
 printf("[ustore] Opening src file: %s\n", src_name);

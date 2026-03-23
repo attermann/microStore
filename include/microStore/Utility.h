@@ -31,28 +31,39 @@ namespace microStore {
 // millis() is a reliable Arduino built-in on both ESP32 and nRF52840.
 // std::chrono::steady_clock is intentionally avoided: the Adafruit nRF52
 // Arduino core lacks the _gettimeofday_r backend and causes linker errors.
-static inline uint32_t ustore_millis()
-{
-	return (uint32_t)millis();
+inline static uint32_t millis() {
+	return (uint32_t)::millis();
+}
+// CBA static inline variables in < C++17 so must use workaround instead
+// set time offset for devices without a real-time clock
+//inline static uint32_t time_offset = 0;
+//inline static void set_time_offset(uint32_t offset) {
+//	time_offset = offset;
+//}
+inline uint32_t& time_offset() {
+    static uint32_t g_time_offet = 0;
+    return g_time_offet;
+}
+inline void set_time_offset(uint32_t offset) {
+	time_offset() = offset;
 }
 // return current time in seconds since startup
-inline static uint32_t ustore_time() {
+inline static uint32_t time() {
 	// handle roll-over of 32-bit millis (approx. 49 days)
 	static uint32_t low32, high32;
-	uint32_t new_low32 = millis();
+	uint32_t new_low32 = ::millis();
 	if (new_low32 < low32) high32++;
 	low32 = new_low32;
-	return (uint32_t)(((uint64_t)high32 << 32 | low32)/1000);
+	return (uint32_t)(((uint64_t)high32 << 32 | low32)/1000) + time_offset();
 }
 #else
-static inline uint32_t ustore_millis()
-{
+inline static uint32_t millis() {
 	using namespace std::chrono;
 	return (uint32_t)duration_cast<milliseconds>(
 		steady_clock::now().time_since_epoch()).count();
 }
 // return current time in seconds since 00:00:00, January 1, 1970 (Unix Epoch)
-inline static uint32_t ustore_time() {
+inline static uint32_t time() {
 	timeval time;
 	::gettimeofday(&time, NULL);
 	return (uint32_t)(((uint64_t)(time.tv_sec * 1000) + (uint64_t)(time.tv_usec / 1000))/1000);

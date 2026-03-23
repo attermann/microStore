@@ -36,8 +36,16 @@ static int     g_nfiles = 0;
 
 static int find_file(const char* name) {
     for (int i = 0; i < g_nfiles; i++)
-        if (strcmp(g_names[i], name) == 0) return i;
+        if (g_names[i][0] != '\0' && strcmp(g_names[i], name) == 0) return i;
     return -1;
+}
+
+// Find first slot with an empty name (tombstone or never used), or extend g_nfiles.
+static int alloc_slot() {
+    for (int i = 0; i < g_nfiles; i++)
+        if (g_names[i][0] == '\0') return i;
+    if (g_nfiles >= 16) return -1;
+    return g_nfiles++;
 }
 
 class RamFileImpl : public microStore::FileImpl {
@@ -104,11 +112,15 @@ protected:
         bool ap = (mode == microStore::File::ModeAppend || mode == microStore::File::ModeReadAppend);
         int idx = find_file(path);
         if (wr) {
-            if (idx < 0) { if (g_nfiles >= 16) return {}; idx = g_nfiles++; strncpy(g_names[idx], path, 63); g_names[idx][63] = '\0'; }
+            if (idx < 0) { idx = alloc_slot(); if (idx < 0) return {}; strncpy(g_names[idx], path, 63); g_names[idx][63] = '\0'; }
             g_files[idx].data.clear(); g_files[idx].pos = 0; g_files[idx].open = true;
             g_files[idx].write_mode = true; g_files[idx].append_mode = false;
         } else if (ap) {
-            if (idx < 0) { if (g_nfiles >= 16) return {}; idx = g_nfiles++; strncpy(g_names[idx], path, 63); g_names[idx][63] = '\0'; }
+            if (idx < 0) {
+                idx = alloc_slot(); if (idx < 0) return {};
+                strncpy(g_names[idx], path, 63); g_names[idx][63] = '\0';
+                g_files[idx].data.clear(); g_files[idx].pos = 0;
+            }
             g_files[idx].open = true; g_files[idx].write_mode = true; g_files[idx].append_mode = true;
             g_files[idx].pos = g_files[idx].data.size();
         } else {
@@ -123,15 +135,28 @@ protected:
     virtual bool remove(const char* path) override {
         int idx = find_file(path);
         if (idx < 0) return false;
+        // Tombstone: clear data and mark name empty so the slot can be reused.
+        // Do NOT shift other entries — that would invalidate stored _idx values in
+        // any open RamFileImpl objects.
         g_files[idx].data.clear(); g_files[idx].pos = 0;
-        for (int i = idx; i < g_nfiles - 1; i++) { g_files[i] = g_files[i+1]; strncpy(g_names[i], g_names[i+1], 63); }
-        g_nfiles--;
+        g_files[idx].open = false; g_files[idx].write_mode = false; g_files[idx].append_mode = false;
+        g_names[idx][0] = '\0';
+        // Trim g_nfiles past trailing tombstones so alloc_slot() still works.
+        while (g_nfiles > 0 && g_names[g_nfiles - 1][0] == '\0') g_nfiles--;
         return true;
     }
     virtual bool rename(const char* src, const char* dst) override {
         int si = find_file(src); if (si < 0) return false;
-        int di = find_file(dst); if (di >= 0) remove(dst);
-        di = find_file(src); strncpy(g_names[di], dst, 63); g_names[di][63] = '\0';
+        int di = find_file(dst);
+        if (di >= 0) {
+            // Remove dst in-place (no shift), then rename src.
+            g_files[di].data.clear(); g_files[di].pos = 0;
+            g_files[di].open = false; g_files[di].write_mode = false; g_files[di].append_mode = false;
+            g_names[di][0] = '\0';
+            while (g_nfiles > 0 && g_names[g_nfiles - 1][0] == '\0') g_nfiles--;
+            // si is still valid (no shift happened).
+        }
+        strncpy(g_names[si], dst, 63); g_names[si][63] = '\0';
         return true;
     }
     virtual bool mkdir(const char* path) override { (void)path; return true; }
@@ -145,7 +170,11 @@ protected:
 };
 
 static void reset_ram_fs() {
-    for (int i = 0; i < g_nfiles; i++) { g_files[i].data.clear(); g_files[i].pos = 0; g_files[i].open = false; }
+    for (int i = 0; i < 16; i++) {
+        g_files[i].data.clear(); g_files[i].pos = 0;
+        g_files[i].open = false; g_files[i].write_mode = false; g_files[i].append_mode = false;
+        g_names[i][0] = '\0';
+    }
     g_nfiles = 0;
 }
 static microStore::FileSystem make_ram_fs() { return microStore::FileSystem{new RamFileSystemImpl()}; }
@@ -154,8 +183,9 @@ static void remove_ram_file(const char* name) {
     int idx = find_file(name);
     if (idx < 0) return;
     g_files[idx].data.clear(); g_files[idx].pos = 0;
-    for (int i = idx; i < g_nfiles - 1; i++) { g_files[i] = g_files[i+1]; strncpy(g_names[i], g_names[i+1], 63); }
-    g_nfiles--;
+    g_files[idx].open = false; g_files[idx].write_mode = false; g_files[idx].append_mode = false;
+    g_names[idx][0] = '\0';
+    while (g_nfiles > 0 && g_names[g_nfiles - 1][0] == '\0') g_nfiles--;
 }
 
 /* ---- Helpers ---- */
@@ -176,7 +206,7 @@ static void write_records_to_disk(const char* prefix,
         for (int i = 0; i < n_keys; i++) {
             char val[16];
             snprintf(val, sizeof(val), "v%d", i);
-            writer.put(keys[i], val, (uint32_t)(base_ts + i));
+            writer.put(keys[i], val, /*ttl=*/0, (uint32_t)(base_ts + i));
         }
         // writer destructs; data is in g_files segment
     }
@@ -201,7 +231,7 @@ void test_ttl_get_expires_old_record() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("k", "hello", /*ts=*/1u);
+        writer.put("k", "hello", /*ttl=*/0, /*ts=*/1u);
     }
     remove_ram_file("/p_index.dat");  // force rebuild_index_from_segments()
 
@@ -228,12 +258,12 @@ void test_ttl_get_expires_old_record() {
 void test_ttl_get_keeps_fresh_record() {
     reset_ram_fs();
 
-    uint32_t now = microStore::ustore_time();
+    uint32_t now = microStore::time();
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("k", "world", now);  // written "now"
+        writer.put("k", "world", /*ttl=*/0, now);  // written "now"
     }
     remove_ram_file("/p_index.dat");  // force rebuild_index_from_segments()
 
@@ -255,13 +285,13 @@ void test_ttl_get_keeps_fresh_record() {
 void test_ttl_compact_removes_expired() {
     reset_ram_fs();
 
-    uint32_t now = microStore::ustore_time();
+    uint32_t now = microStore::time();
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("old",   "stale", /*ts=*/1u);    // very old
-        writer.put("fresh", "live",  now);           // current
+        writer.put("old",   "stale", /*ttl=*/0, /*ts=*/1u);    // very old
+        writer.put("fresh", "live",  /*ttl=*/0, now);           // current
     }
     remove_ram_file("/p_index.dat");  // force rebuild_index_from_segments()
 
@@ -371,7 +401,7 @@ void test_file_store_put_get() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("mykey", "hello", /*ts=*/1u);
+        writer.put("mykey", "hello", /*ttl=*/0, /*ts=*/1u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -394,8 +424,8 @@ void test_file_store_overwrite() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("k", "first",  /*ts=*/1u);
-        writer.put("k", "second", /*ts=*/2u);
+        writer.put("k", "first",  /*ttl=*/0, /*ts=*/1u);
+        writer.put("k", "second", /*ttl=*/0, /*ts=*/2u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -418,7 +448,7 @@ void test_file_store_remove() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("gone", "val", /*ts=*/1u);
+        writer.put("gone", "val", /*ttl=*/0, /*ts=*/1u);
         writer.remove("gone");
     }
     remove_ram_file("/p_index.dat");
@@ -441,9 +471,9 @@ void test_file_store_size() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("a", "1", /*ts=*/1u);
-        writer.put("b", "2", /*ts=*/2u);
-        writer.put("a", "x", /*ts=*/3u);  // overwrite
+        writer.put("a", "1", /*ttl=*/0, /*ts=*/1u);
+        writer.put("b", "2", /*ttl=*/0, /*ts=*/2u);
+        writer.put("a", "x", /*ttl=*/0, /*ts=*/3u);  // overwrite
         writer.remove("b");
     }
     remove_ram_file("/p_index.dat");
@@ -465,8 +495,8 @@ void test_file_store_clear() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("x", "1", /*ts=*/1u);
-        writer.put("y", "2", /*ts=*/2u);
+        writer.put("x", "1", /*ttl=*/0, /*ts=*/1u);
+        writer.put("y", "2", /*ttl=*/0, /*ts=*/2u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -493,7 +523,7 @@ void test_file_store_exists() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("present", "v", /*ts=*/1u);
+        writer.put("present", "v", /*ttl=*/0, /*ts=*/1u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -512,9 +542,9 @@ void test_file_store_iterator() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("alpha", "AAA", /*ts=*/1u);
-        writer.put("beta",  "BB",  /*ts=*/2u);
-        writer.put("gamma", "C",   /*ts=*/3u);
+        writer.put("alpha", "AAA", /*ttl=*/0, /*ts=*/1u);
+        writer.put("beta",  "BB",  /*ttl=*/0, /*ts=*/2u);
+        writer.put("gamma", "C",   /*ttl=*/0, /*ts=*/3u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -569,7 +599,7 @@ void test_file_store_max_recs_put_eviction() {
     TEST_ASSERT_EQUAL(2u, reader.size());
 
     // A new put on the live-index store should evict "first" (oldest).
-    reader.put("third", "v", microStore::ustore_time());
+    reader.put("third", "v", /*ttl=*/0, microStore::time());
     TEST_ASSERT_EQUAL(2u, reader.size());
     TEST_ASSERT_FALSE(reader.exists("first"));
     TEST_ASSERT_TRUE(reader.exists("second"));
@@ -588,7 +618,7 @@ void test_file_store_ttl_exists_expires() {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("k", "hello", /*ts=*/1u);
+        writer.put("k", "hello", /*ttl=*/0, /*ts=*/1u);
     }
     remove_ram_file("/p_index.dat");
 
@@ -607,16 +637,16 @@ void test_file_store_ttl_exists_expires() {
 void test_file_store_compact_basic() {
     reset_ram_fs();
 
-    uint32_t now = microStore::ustore_time();
+    uint32_t now = microStore::time();
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
         writer.init(fs, "/p");
-        writer.put("a", "v1", now);
-        writer.put("b", "v2", now);
-        writer.put("a", "v3", now + 1);  // overwrite "a"
+        writer.put("a", "v1", /*ttl=*/0, now);
+        writer.put("b", "v2", /*ttl=*/0, now);
+        writer.put("a", "v3", /*ttl=*/0, now + 1);  // overwrite "a"
         writer.remove("b");              // delete "b"
-        writer.put("c", "v4", now + 2);
+        writer.put("c", "v4", /*ttl=*/0, now + 2);
     }
     remove_ram_file("/p_index.dat");
 

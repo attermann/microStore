@@ -237,7 +237,7 @@ void test_iterator_single_record() {
     TEST_ASSERT_TRUE(store.init(fs, "/test"));
 
     const char* val = "hello";
-    store.put("mykey", val, 42u);
+    store.put("mykey", val, /*ttl=*/0, 42u);
 
     int count = 0;
     for (auto& e : store) {

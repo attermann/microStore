@@ -39,6 +39,9 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 | File | Purpose |
 |------|---------|
 | `include/microStore/FileStore.h` | KV store engine — the main library logic |
+| `include/microStore/HeapStore.h` | In-memory KV store with TTL/eviction; same API shape as `FileStore` |
+| `include/microStore/TypedStore.h` | Typed wrapper over any store (`FileStore` or `HeapStore`) |
+| `include/microStore/Codec.h` | Encode/decode specializations for `TypedStore` keys and values |
 | `include/microStore/FileSystem.h` | OOP filesystem abstraction (`FileSystem` / `FileSystemImpl`) |
 | `include/microStore/File.h` | OOP file abstraction (`File` / `FileImpl`) with integrated CRC-32 |
 | `include/microStore/Crc.h` | CRC-32 utility |
@@ -50,11 +53,13 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 | Build Flag | Backend | Platform |
 |-----------|---------|---------|
-| `USTORE_USE_POSIXFS` | `PosixFileSystemImpl` | native (Linux/macOS) |
-| `USTORE_USE_LITTLEFS` | `LittleFSFileSystemImpl` | ESP32 |
-| `USTORE_USE_SPIFFS` | `SPIFFSFileSystemImpl` | ESP32 |
-| `USTORE_USE_INTERNALFS` | `InternalFSFileSystemImpl` | nRF52 |
-| `USTORE_USE_FLASHFS` | `FlashFSFileSystemImpl` | nRF52 + SPI flash |
+| `USTORE_USE_POSIXFS` | `PosixFileSystem` | native (Linux/macOS) |
+| `USTORE_USE_LITTLEFS` | `LittleFSFileSystem` | ESP32 |
+| `USTORE_USE_SPIFFS` | `SPIFFSFileSystem` | ESP32 |
+| `USTORE_USE_INTERNALFS` | `InternalFSFileSystem` | nRF52 |
+| `USTORE_USE_FLASHFS` | `FlashFSFileSystem` | nRF52 + SPI flash |
+| `USTORE_USE_UNIVERSALFS` | `UniversalFileSystem` | auto-selects nRF52 or POSIX |
+| `USTORE_USE_NOOPFS` | `NoopFileSystem` | stub (all ops return false/0) |
 
 `File` accumulates a running CRC-32 on every read/write transparently; call `file.crc()` to retrieve it. To add a new platform, subclass `FileSystemImpl` and `FileImpl`.
 
@@ -74,14 +79,30 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 | `USTORE_MAX_KEY_LEN` | 64 | Max key length in bytes |
 | `USTORE_COMPACT_RETRY_MS` | 60000 | Compaction cooldown (ms) |
 
-### Public API (`microStore::FileStore`)
+### Store Variants
 
-Include as `#include <microStore/FileStore.h>`. The library is header-only; `src/` is intentionally empty (`srcFilter: [-<*>]` in `library.json`).
+Three store types share a common API shape and are interchangeable as the backing store for `TypedStore`:
 
-- `init(FileSystem fs, const char* prefix)` — initialize with a `FileSystem` instance and file name prefix
+**`microStore::FileStore`** (`FileStore.h`) — persistent, crash-safe, append-only log store.
+- `init(FileSystem fs, const char* prefix)` — initialize with a `FileSystem` and file name prefix
 - `put(key, ts, data, len)` — write key-value (overloads for `uint8_t*`, `char*`, `std::vector`)
 - `get(key, out, len)` — read value
-- `remove(key)` — logical delete
+- `remove(key)` — logical delete (tombstone); compaction reclaims space
 - `clear()` — wipe all data
 - `dumpInfo(detailed)` — print storage statistics
-- Range-based for loop supported via `begin()`/`end()` returning a forward iterator over `Store::Entry` (key, value, timestamp)
+- Range-based for loop via `begin()`/`end()` over `Entry` (key, value, timestamp)
+
+**`microStore::HeapStore`** (`HeapStore.h`) — in-memory store backed by `std::map`. Same API as `FileStore` plus:
+- `exists(key)` — check if key is present (and not expired)
+- `size()` — number of live records
+- `set_ttl_secs(secs)` — global TTL; entries older than this are lazily evicted
+- `set_max_recs(n)` — evict oldest entry (by map order) when count exceeds `n`
+- `put(key, data, len, ttl, ts)` — per-entry TTL overrides global policy
+- `BasicHeapStore<Allocator>` template allows custom allocators; `HeapStore` is `BasicHeapStore<>`
+
+**`microStore::TypedStore<Key, Value, Store>`** (`TypedStore.h`) — typed adapter over any store.
+- Wraps a store reference; does not own it
+- Encodes/decodes via `Codec<Key>` and `Codec<Value>` specializations
+- Built-in codecs: `std::string`, `std::vector<uint8_t>`, `char*`
+- Custom types require a `Codec<T>` specialization with `encode(T) → vector<uint8_t>` and `decode(vector<uint8_t>, T&) → bool`
+- Range-based for loop yields `TypedStore::Entry{key, value}`
