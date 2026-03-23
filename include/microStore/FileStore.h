@@ -60,6 +60,10 @@ namespace microStore {
 #define USTORE_COMPACT_RETRY_MS 60000   // ms between compact() retries after failure
 #endif
 
+#ifndef USTORE_COMPACT_THRESHOLD
+#define USTORE_COMPACT_THRESHOLD 50  // % dead records that trigger auto-compact (0 = disabled)
+#endif
+
 #ifndef USTORE_DEFAULT_TTL_SECS
 #define USTORE_DEFAULT_TTL_SECS 0
 #endif
@@ -182,6 +186,7 @@ public:
 		_filesystem.remove(name);
 
 		_index.clear();
+		_dead_since_compact = 0;
 		current_segment=0;
 		current_offset=0;
 		write_buf_pos=0;
@@ -239,6 +244,7 @@ public:
 			return false;
 		}
 
+		if (index_find(key, key_len)) _dead_since_compact++;
 		index_insert(key, key_len, current_segment, offset, ts);
 
 		// Enforce max_recs: evict the oldest record(s) from the in-memory index
@@ -250,6 +256,8 @@ public:
 		persist_index_entry(key, key_len, current_segment, offset, ts);
 
 		current_offset += sizeof(hdr)+key_len+len+sizeof(c);
+
+		compact_if_threshold_();
 
 printf("[ustore] Successfully put key %s with data length %u\n", bin_str(key, key_len), len);
 //printf("[ustore] put: %s\n", bin_str((uint8_t*)data, len));
@@ -395,11 +403,14 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 		flush_buffer();  // ensure tombstone is on flash before committing index entry
 
+		if (index_find(key, key_len)) _dead_since_compact++;
 		index_remove(key, key_len);
 
 		persist_index_entry(key, key_len, 0xFFFFFFFF, 0);
 
 		current_offset += sizeof(RecordHeader) + key_len + sizeof(RecordCommit);
+
+		compact_if_threshold_();
 
 		return true;
 	}
@@ -469,8 +480,7 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		uint32_t total_dead_entries = 0;
 		uint32_t total_dead_bytes = 0;
 
-			for(uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++)
-		{
+		for(uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++) {
 			char name[USTORE_MAX_FILENAME_LEN];
 			segment_name(seg, name);
 
@@ -489,48 +499,39 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 				file_size = (uint32_t)f.tell();
 				f.seek(0, SeekModeSet);
 
-				while(true)
-				{
+				while(true) {
 					uint32_t offset = (uint32_t)f.tell();
 
 					RecordHeader hdr;
-					if(f.read(&hdr, sizeof(hdr)) != sizeof(hdr))
-						break;
+					if(f.read(&hdr, sizeof(hdr)) != sizeof(hdr)) break;
 
-					if(hdr.magic != MAGIC_RECORD)
-						break;
+					if(hdr.magic != MAGIC_RECORD) break;
 
-					if(hdr.key_len > USTORE_MAX_KEY_LEN)
-						break;
+					if(hdr.key_len > USTORE_MAX_KEY_LEN) break;
 
 					uint8_t key[USTORE_MAX_KEY_LEN];
-					if(f.read(key, hdr.key_len) != hdr.key_len)
-						break;
+					if(f.read(key, hdr.key_len) != hdr.key_len) break;
 
 					f.seek((long)(offset + sizeof(hdr) + hdr.key_len + hdr.length), SeekModeSet);
 
 					RecordCommit c;
-					if(f.read(&c, sizeof(c)) != sizeof(c))
-						break;
+					if(f.read(&c, sizeof(c)) != sizeof(c)) break;
 
-					if(c.magic != MAGIC_COMMIT)
-						break;
+					if(c.magic != MAGIC_COMMIT) break;
 
 					uint32_t record_size = sizeof(RecordHeader) + hdr.key_len + hdr.length + sizeof(RecordCommit);
 
-					if(hdr.flags & FLAG_DELETE)
-					{
+					if (hdr.flags & FLAG_DELETE) {
 						tomb_entries++;
 						tomb_bytes += record_size;
 					}
-					else
-					{
+					else {
 						IndexValue* iv = index_find(key, hdr.key_len);
 						bool live = (iv && iv->segment == seg && iv->offset == offset);
-						if(live)
+						if(live) {
 							entries++;
-						else
-						{
+						}
+						else {
 							dead_entries++;
 							dead_bytes += record_size;
 						}
@@ -1018,6 +1019,17 @@ printf("[ustore] Rotating segment...\n");
 		_filesystem.remove(name);
 	}
 
+	void compact_if_threshold_()
+	{
+#if USTORE_COMPACT_THRESHOLD > 0
+		uint32_t total = (uint32_t)_index.size() + _dead_since_compact;
+		if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
+printf("[ustore] Compaction triggered by deleted threshold\n");
+			compact();
+		}
+#endif
+	}
+
 	void recover_if_needed()
 	{
 		char name[USTORE_MAX_FILENAME_LEN]; journal_name(name);
@@ -1286,6 +1298,8 @@ printf("[ustore] Closing tmp file: %s\n", tmp_name);
 
 		clear_journal();
 
+		_dead_since_compact = 0;
+
 		return true;
 	}
 
@@ -1303,6 +1317,7 @@ private:
 
 	bool compact_in_cooldown = false;
 	uint32_t compact_cooldown_start_ms = 0;
+	uint32_t _dead_since_compact = 0;
 
 	uint32_t policy_ttl_secs = USTORE_DEFAULT_TTL_SECS; // 0 = TTL disabled (seconds)
 	uint32_t policy_max_recs = USTORE_DEFAULT_MAX_RECS; // 0 = max-records disabled
