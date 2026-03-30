@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "Store.h"
 #include "File.h"
 #include "FileSystem.h"
 #include "Utility.h"
@@ -113,29 +114,38 @@ struct RecordCommit
 
 #pragma pack(pop)
 
-/* ---------------- STORAGE ENGINE ---------------- */
+/* ---------------- STORAGE ENGINE IMPLEMENTATION ---------------- */
+
+// Forward declaration
+template<typename Allocator> class BasicFileStore;
 
 template<typename Allocator = std::allocator<uint8_t>>
-class BasicFileStore
+class FileStoreImpl : public StoreImpl<Allocator>
 {
 public:
 
 	using allocator_type = Allocator;
 
-	BasicFileStore(uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT) : BasicFileStore(Allocator{}, segment_size, segment_count) {}
-	explicit BasicFileStore(const Allocator& alloc, uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT)
-		: _alloc(alloc), _segment_size(segment_size), _segment_count(segment_count), _index(map_alloc_type(_alloc)) { write_buf_pos = 0; }
+	FileStoreImpl(uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT) : FileStoreImpl(Allocator{}, segment_size, segment_count) {}
+	explicit FileStoreImpl(const Allocator& alloc, uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT)
+		: StoreImpl<Allocator>(alloc), _segment_size(segment_size), _segment_count(segment_count), _index(map_alloc_type(this->_alloc)) { write_buf_pos = 0; }
 
-	~BasicFileStore()
+	~FileStoreImpl()
 	{
 		if (isValid())
 			flush_buffer();
 	}
 
-	inline allocator_type get_allocator() const { return _alloc; }
+	inline allocator_type get_allocator() const { return this->_alloc; }
 
-	inline bool isValid() const { if (!_filesystem) return false; return true; }
+	inline bool isValid() const override { if (!_filesystem) return false; return true; }
 	inline operator bool() const { return isValid(); }
+
+	// Override base class init() to return error - use init(FileSystem&, const char*) instead
+	bool init() override {
+		printf("[ustore] ERROR: FileStore requires init(FileSystem&, const char*), not init()\n");
+		return false;
+	}
 
 	bool init(FileSystem& filesystem, const char* prefix)
 	{
@@ -175,7 +185,7 @@ public:
 		return true;
 	}
 
-	void clear()
+	void clear() override
 	{
         if (!isValid()) return;
 
@@ -260,7 +270,7 @@ public:
 		// Enforce max_recs: evict the oldest record(s) from the in-memory index
 		// when a new key pushes the count over the limit. Orphaned disk records
 		// will be reclaimed at the next compaction.
-		if (policy_max_recs > 0 && _index.size() > policy_max_recs)
+		if (this->policy_max_recs > 0 && _index.size() > this->policy_max_recs)
 			prune_index_to_max_recs_();
 
 		persist_index_entry(key, key_len, current_segment, offset, ts, ttl);
@@ -289,7 +299,7 @@ printf("[ustore] put: wrote key %s with data length %u\n", bin_str(key, key_len)
 		return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
 	}
 
-	inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time())
+	inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time()) override
 	{
 		return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ttl, ts);
 	}
@@ -375,7 +385,7 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		return get(key.data(), (uint8_t)key.size(), out, size);
 	}
 
-	inline bool get(const std::vector<uint8_t>& key, std::vector<uint8_t>& out)
+	inline bool get(const std::vector<uint8_t>& key, std::vector<uint8_t>& out) override
 	{
 		out.resize(USTORE_MAX_VALUE_LEN);
 		uint16_t size = USTORE_MAX_VALUE_LEN;
@@ -432,7 +442,7 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		return remove((const uint8_t*)key, (uint8_t)strlen(key));
 	}
 
-	inline bool remove(const std::vector<uint8_t>& key)
+	inline bool remove(const std::vector<uint8_t>& key) override
 	{
 		return remove(key.data(), (uint8_t)key.size());
 	}
@@ -454,14 +464,14 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		return exists((const uint8_t*)key, (uint8_t)strlen(key));
 	}
 
-	inline bool exists(const std::vector<uint8_t>& key)
+	inline bool exists(const std::vector<uint8_t>& key) override
 	{
 		return exists(key.data(), (uint8_t)key.size());
 	}
 
 	/* -------- SIZE -------- */
 
-	inline size_t size()
+	inline size_t size() const override
 	{
         if (!isValid()) return 0;
 		return _index.size();
@@ -469,19 +479,19 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 
 	/* -------- POLICY -------- */
 
-	inline void set_ttl_secs(uint32_t ttl_s)
+	inline void set_ttl_secs(uint32_t ttl_s) override
 	{
-		policy_ttl_secs    = ttl_s;
+		this->policy_ttl_secs = ttl_s;
 	}
 
-	inline void set_max_recs(uint32_t max_recs)
+	inline void set_max_recs(uint32_t max_recs) override
 	{
-		policy_max_recs = max_recs;
+		this->policy_max_recs = max_recs;
 	}
 
 	/* -------- DUMP INFO -------- */
 
-	void dumpInfo(bool detailed = true)
+	void dumpInfo(bool detailed = true) override
 	{
 		flush_buffer();
 
@@ -612,19 +622,69 @@ private:
 		KeyType, IndexValue, VectorHash, std::equal_to<KeyType>, map_alloc_type>;
 
 	KeyType make_key(const uint8_t* key, uint8_t key_len) const {
-		return KeyType(key, key + key_len, byte_alloc_type(_alloc));
+		return KeyType(key, key + key_len, byte_alloc_type(this->_alloc));
 	}
 
 public:
 
 	/* -------- ENTRY -------- */
 
-	struct Entry {
-		std::vector<uint8_t> key;
-		std::vector<uint8_t> value;
-		uint32_t timestamp;
-		uint32_t ttl;
-	};
+	using Entry = typename StoreImpl<Allocator>::Entry;
+
+protected:
+
+	/* -------- TYPE-ERASED ITERATOR SUPPORT -------- */
+
+	// Type-erased iterator support for base class polymorphism
+	void* begin_impl() override {
+		flush_buffer();
+		return new typename IndexMap::iterator(_index.begin());
+	}
+
+	void* end_impl() override {
+		return new typename IndexMap::iterator(_index.end());
+	}
+
+	void iterator_increment(void* handle) override {
+		auto* it = static_cast<typename IndexMap::iterator*>(handle);
+		++(*it);
+	}
+
+	bool iterator_equal(void* a, void* b) override {
+		auto* it_a = static_cast<typename IndexMap::iterator*>(a);
+		auto* it_b = static_cast<typename IndexMap::iterator*>(b);
+		return *it_a == *it_b;
+	}
+
+	typename StoreImpl<Allocator>::Entry iterator_deref(void* handle) override {
+		auto* it = static_cast<typename IndexMap::iterator*>(handle);
+		typename StoreImpl<Allocator>::Entry e;
+		e.key.assign((*it)->first.begin(), (*it)->first.end());
+		e.timestamp = (*it)->second.timestamp;
+		e.ttl = (*it)->second.ttl;
+
+		// Load value from disk
+		char name[USTORE_MAX_FILENAME_LEN];
+		segment_name((*it)->second.segment, name);
+		File f = _filesystem.open(name, File::ModeRead);
+		if (f) {
+			f.seek((long)(*it)->second.offset, SeekModeSet);
+			RecordHeader hdr;
+			f.read(&hdr, sizeof(hdr));
+			f.seek((long)((*it)->second.offset + sizeof(hdr) + hdr.key_len), SeekModeSet);
+			e.value.resize(hdr.length);
+			if (hdr.length > 0)
+				f.read(e.value.data(), hdr.length);
+			f.close();
+		}
+		return e;
+	}
+
+	void iterator_destroy(void* handle) override {
+		delete static_cast<typename IndexMap::iterator*>(handle);
+	}
+
+public:
 
 	/* -------- ITERATOR -------- */
 
@@ -669,11 +729,11 @@ public:
 		bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
 
 	private:
-		friend class BasicFileStore<Allocator>;
+		friend class FileStoreImpl<Allocator>;
 
 		using idx_iter = typename IndexMap::iterator;
 
-		iterator(BasicFileStore* store, idx_iter pos, idx_iter end)
+		iterator(FileStoreImpl* store, idx_iter pos, idx_iter end)
 			: store_(store), pos_(pos), end_(end), value_loaded_(false)
 		{
 			load_meta();
@@ -711,7 +771,7 @@ public:
 			f.close();
 		}
 
-		BasicFileStore*      store_;
+		FileStoreImpl*       store_;
 		idx_iter             pos_;
 		idx_iter             end_;
 		IndexValue           iv_;
@@ -794,20 +854,20 @@ private:
 
 	bool is_ttl_expired_(uint32_t ts, uint32_t record_ttl) const
 	{
-		uint32_t effective_ttl = (record_ttl > 0) ? record_ttl : policy_ttl_secs;
+		uint32_t effective_ttl = (record_ttl > 0) ? record_ttl : this->policy_ttl_secs;
 		return effective_ttl > 0 && microStore::time() > ts && (microStore::time() - ts) >= effective_ttl;
 	}
 
-	// Evict the oldest records (by timestamp) until _index.size() <= policy_max_recs.
+	// Evict the oldest records (by timestamp) until _index.size() <= this->policy_max_recs.
 	// Returns the number of entries evicted.
 	// When to_evict == 1 (the common put() path), a simple O(n) scan is used to
 	// avoid heap allocation.  When to_evict > 1 (init / compact), a partial sort
 	// is used to evict all excess entries in a single pass.
 	size_t prune_index_to_max_recs_()
 	{
-		if (policy_max_recs == 0 || _index.size() <= policy_max_recs) return 0;
+		if (this->policy_max_recs == 0 || _index.size() <= this->policy_max_recs) return 0;
 
-		size_t to_evict = _index.size() - policy_max_recs;
+		size_t to_evict = _index.size() - this->policy_max_recs;
 
 		if (to_evict == 1) {
 			// Fast path: single linear scan for the oldest entry.
@@ -819,7 +879,7 @@ private:
 			// Bulk path: collect (timestamp, key) pairs, partial-sort, then erase.
 			using KTSPair = std::pair<uint32_t, KeyType>;
 			using KTSAlloc = rebind_alloc<KTSPair>;
-			KTSAlloc kts_alloc(_alloc);
+			KTSAlloc kts_alloc(this->_alloc);
 			std::vector<KTSPair, KTSAlloc> candidates(kts_alloc);
 			candidates.reserve(_index.size());
 			for (auto& kv : _index)
@@ -832,7 +892,7 @@ private:
 		}
 		// Record(s) evicted so increment _dead_since_compact
 		_dead_since_compact += to_evict;
-printf("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
+printf("[ustore] Evicted %lu records to this->policy_max_recs\n", to_evict);
 
 		return to_evict;
 	}
@@ -1232,7 +1292,7 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 			KeyType key;
 		};
 		using LiveRecVec = std::vector<LiveRec, rebind_alloc<LiveRec>>;
-		rebind_alloc<LiveRec> lr_alloc(_alloc);
+		rebind_alloc<LiveRec> lr_alloc(this->_alloc);
 		LiveRecVec per_seg[_segment_count];
 		for (auto& v : per_seg) {
 			v = LiveRecVec(lr_alloc);
@@ -1364,16 +1424,111 @@ private:
 	uint32_t compact_cooldown_start_ms = 0;
 	uint32_t _dead_since_compact = 0;
 
-	uint32_t policy_ttl_secs = USTORE_DEFAULT_TTL_SECS; // 0 = TTL disabled (seconds)
-	uint32_t policy_max_recs = USTORE_DEFAULT_MAX_RECS; // 0 = max-records disabled
-
 	uint8_t write_buf[USTORE_WRITE_BUFFER_SIZE];
 	size_t write_buf_pos;
 
-	Allocator _alloc;
 	IndexMap _index;
+
+friend class BasicFileStore<Allocator>;
 };
 
+/* ---------------- FILESTORE WRAPPER CLASS ---------------- */
+
+template<typename Allocator = std::allocator<uint8_t>>
+class BasicFileStore : public Store<Allocator>
+{
+public:
+	using allocator_type = Allocator;
+	using Entry = typename Store<Allocator>::Entry;
+
+	BasicFileStore(uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT)
+		: Store<Allocator>(new FileStoreImpl<Allocator>(Allocator{}, segment_size, segment_count)) {}
+
+	explicit BasicFileStore(const Allocator& alloc, uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT)
+		: Store<Allocator>(new FileStoreImpl<Allocator>(alloc, segment_size, segment_count)) {}
+
+	inline allocator_type get_allocator() const {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->get_allocator();
+	}
+
+	// FileStore-specific init method
+	bool init(FileSystem& filesystem, const char* prefix) {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->init(filesystem, prefix);
+	}
+
+	// FileStore-specific compact method
+	bool compact() {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->compact();
+	}
+
+	// Bring base class methods into scope to avoid hiding
+	using Store<Allocator>::put;
+	using Store<Allocator>::get;
+	using Store<Allocator>::remove;
+	using Store<Allocator>::exists;
+
+	// Convenience overloads for put
+	inline bool put(const uint8_t* key, uint8_t key_len, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->put(key, key_len, data, len, ttl, ts);
+	}
+
+	inline bool put(const char* key, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+		return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ttl, ts);
+	}
+
+	inline bool put(const char* key, const char* data, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+		return put((const uint8_t*)key, (uint8_t)strlen(key), (const uint8_t*)data, (uint16_t)strlen(data), ttl, ts);
+	}
+
+	inline bool put(const std::vector<uint8_t>& key, const uint8_t* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+		return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
+	}
+
+	// Convenience overloads for get
+	inline bool get(const uint8_t* key, uint8_t key_len, uint8_t* out, uint16_t* size) {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->get(key, key_len, out, size);
+	}
+
+	inline bool get(const char* key, uint8_t* out, uint16_t* size) {
+		return get((const uint8_t*)key, (uint8_t)strlen(key), out, size);
+	}
+
+	inline bool get(const std::vector<uint8_t>& key, uint8_t* out, uint16_t* size) {
+		return get(key.data(), (uint8_t)key.size(), out, size);
+	}
+
+	// Convenience overloads for remove
+	inline bool remove(const char* key) {
+		return this->remove(std::vector<uint8_t>((const uint8_t*)key, (const uint8_t*)key + strlen(key)));
+	}
+
+	inline bool remove(const uint8_t* key, uint8_t key_len) {
+		return this->remove(std::vector<uint8_t>(key, key + key_len));
+	}
+
+	// Convenience overloads for exists
+	inline bool exists(const char* key) {
+		return this->exists(std::vector<uint8_t>((const uint8_t*)key, (const uint8_t*)key + strlen(key)));
+	}
+
+	inline bool exists(const uint8_t* key, uint8_t key_len) {
+		return this->exists(std::vector<uint8_t>(key, key + key_len));
+	}
+
+	// Iterator support - use concrete FileStoreImpl iterator for backward compatibility
+	using iterator = typename FileStoreImpl<Allocator>::iterator;
+
+	iterator begin() {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->begin();
+	}
+
+	iterator end() {
+		return static_cast<FileStoreImpl<Allocator>*>(this->_impl.get())->end();
+	}
+
+	// Disable heap allocation
+	void* operator new(size_t) = delete;
+};
 
 using FileStore = BasicFileStore<>;
 

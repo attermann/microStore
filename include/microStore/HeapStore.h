@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "Store.h"
 #include "Utility.h"
 
 #include <stdint.h>
@@ -36,25 +37,28 @@ namespace microStore {
 #define USTORE_MAX_KEY_LEN 64
 #endif
 
-/* ---------------- HEAP STORE ENGINE ---------------- */
+/* ---------------- HEAP STORE IMPLEMENTATION ---------------- */
+
+// Forward declaration
+template<typename Allocator> class BasicHeapStore;
 
 template<typename Allocator = std::allocator<uint8_t>>
-class BasicHeapStore
+class HeapStoreImpl : public StoreImpl<Allocator>
 {
 public:
 
     using allocator_type = Allocator;
 
-    BasicHeapStore() : BasicHeapStore(Allocator{}) {}
-    explicit BasicHeapStore(const Allocator& alloc)
-        : _alloc(alloc), data_(map_alloc_type(_alloc)) {}
+    HeapStoreImpl() : HeapStoreImpl(Allocator{}) {}
+    explicit HeapStoreImpl(const Allocator& alloc)
+        : StoreImpl<Allocator>(alloc), data_(map_alloc_type(this->_alloc)) {}
 
-    allocator_type get_allocator() const { return _alloc; }
+    allocator_type get_allocator() const { return this->_alloc; }
 
-    inline bool isValid() const { return true; }
+    inline bool isValid() const override { return true; }
 	inline operator bool() const { return isValid(); }
 
-    bool init() { return true; }
+    bool init() override { return true; }
 
     /* -------- PUT -------- */
 
@@ -75,15 +79,15 @@ public:
 
         uint32_t now = microStore::time();
         for (auto it = data_.begin(); it != data_.end(); ) {
-            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : policy_ttl_secs;
+            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : this->policy_ttl_secs;
             if (effective > 0 && now - it->second.timestamp >= effective)
                 it = data_.erase(it);
             else
                 ++it;
         }
 
-        if (policy_max_recs > 0 && data_.count(k) == 0) {
-            while (data_.size() >= policy_max_recs)
+        if (this->policy_max_recs > 0 && data_.count(k) == 0) {
+            while (data_.size() >= this->policy_max_recs)
                 data_.erase(data_.begin());
         }
 
@@ -106,7 +110,7 @@ public:
         return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
     }
 
-    inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time())
+    inline bool put(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data, uint32_t ttl = 0, uint32_t ts = microStore::time()) override
     {
         return put(key.data(), (uint8_t)key.size(), data.data(), (uint16_t)data.size(), ttl, ts);
     }
@@ -126,7 +130,7 @@ public:
         if (it == data_.end()) return false;
 
         {
-            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : policy_ttl_secs;
+            uint32_t effective = (it->second.ttl > 0) ? it->second.ttl : this->policy_ttl_secs;
             if (effective > 0 && microStore::time() - it->second.timestamp >= effective) {
                 data_.erase(it);
                 return false;
@@ -154,7 +158,7 @@ public:
         return get(key.data(), (uint8_t)key.size(), out, size);
     }
 
-    inline bool get(const std::vector<uint8_t>& key, std::vector<uint8_t>& out)
+    inline bool get(const std::vector<uint8_t>& key, std::vector<uint8_t>& out) override
     {
         out.resize(USTORE_MAX_VALUE_LEN);
         uint16_t size = USTORE_MAX_VALUE_LEN;
@@ -179,7 +183,7 @@ public:
         return remove((const uint8_t*)key, (uint8_t)strlen(key));
     }
 
-    inline bool remove(const std::vector<uint8_t>& key)
+    inline bool remove(const std::vector<uint8_t>& key) override
     {
         return remove(key.data(), (uint8_t)key.size());
     }
@@ -198,40 +202,40 @@ public:
         return exists((const uint8_t*)key, (uint8_t)strlen(key));
     }
 
-    inline bool exists(const std::vector<uint8_t>& key)
+    inline bool exists(const std::vector<uint8_t>& key) override
     {
         return exists(key.data(), (uint8_t)key.size());
     }
 
     /* -------- SIZE -------- */
 
-    inline size_t size() const {
+    inline size_t size() const override {
         if (!isValid()) return 0;
         return data_.size();
     }
 
     /* -------- CLEAR -------- */
 
-    void clear() {
+    void clear() override {
         if (!isValid()) return;
         data_.clear();
     }
 
     /* -------- POLICY -------- */
 
-	inline void set_ttl_secs(uint32_t ttl_s)
+	inline void set_ttl_secs(uint32_t ttl_s) override
 	{
-		policy_ttl_secs    = ttl_s;
+		this->policy_ttl_secs = ttl_s;
 	}
 
-	inline void set_max_recs(uint32_t max_recs)
+	inline void set_max_recs(uint32_t max_recs) override
 	{
-		policy_max_recs = max_recs;
+		this->policy_max_recs = max_recs;
 	}
 
     /* -------- DUMP INFO -------- */
 
-    void dumpInfo(bool detailed = true)
+    void dumpInfo(bool detailed = true) override
     {
         size_t total_bytes = 0;
         for (auto& kv : data_)
@@ -262,19 +266,52 @@ private:
     using DataMap        = std::map<KeyType, HeapEntry, std::less<KeyType>, map_alloc_type>;
 
     KeyType make_key(const uint8_t* key, uint8_t key_len) const {
-        return KeyType(key, key + key_len, byte_alloc_type(_alloc));
+        return KeyType(key, key + key_len, byte_alloc_type(this->_alloc));
+    }
+
+protected:
+
+    /* -------- TYPE-ERASED ITERATOR SUPPORT -------- */
+
+    // Type-erased iterator support for base class polymorphism
+    void* begin_impl() override {
+        return new typename DataMap::iterator(data_.begin());
+    }
+
+    void* end_impl() override {
+        return new typename DataMap::iterator(data_.end());
+    }
+
+    void iterator_increment(void* handle) override {
+        auto* it = static_cast<typename DataMap::iterator*>(handle);
+        ++(*it);
+    }
+
+    bool iterator_equal(void* a, void* b) override {
+        auto* it_a = static_cast<typename DataMap::iterator*>(a);
+        auto* it_b = static_cast<typename DataMap::iterator*>(b);
+        return *it_a == *it_b;
+    }
+
+    typename StoreImpl<Allocator>::Entry iterator_deref(void* handle) override {
+        auto* it = static_cast<typename DataMap::iterator*>(handle);
+        typename StoreImpl<Allocator>::Entry e;
+        e.key.assign((*it)->first.begin(), (*it)->first.end());
+        e.value = (*it)->second.value;
+        e.timestamp = (*it)->second.timestamp;
+        e.ttl = (*it)->second.ttl;
+        return e;
+    }
+
+    void iterator_destroy(void* handle) override {
+        delete static_cast<typename DataMap::iterator*>(handle);
     }
 
 public:
 
     /* -------- ENTRY -------- */
 
-    struct Entry {
-        std::vector<uint8_t> key;
-        std::vector<uint8_t> value;
-        uint32_t timestamp;
-        uint32_t ttl;
-    };
+    using Entry = typename StoreImpl<Allocator>::Entry;
 
     /* -------- ITERATOR -------- */
 
@@ -307,7 +344,7 @@ public:
         bool operator!=(const iterator& o) const { return pos_ != o.pos_; }
 
     private:
-        friend class BasicHeapStore<Allocator>;
+        friend class HeapStoreImpl<Allocator>;
 
         using map_iter = typename DataMap::iterator;
 
@@ -337,11 +374,91 @@ public:
 
 private:
 
-    Allocator _alloc;
     DataMap data_;
 
-    uint32_t policy_ttl_secs    = 0;
-    uint32_t policy_max_recs = 0;
+friend class BasicHeapStore<Allocator>;
+};
+
+/* ---------------- HEAPSTORE WRAPPER CLASS ---------------- */
+
+template<typename Allocator = std::allocator<uint8_t>>
+class BasicHeapStore : public Store<Allocator>
+{
+public:
+    using allocator_type = Allocator;
+    using Entry = typename Store<Allocator>::Entry;
+
+    BasicHeapStore() : Store<Allocator>(new HeapStoreImpl<Allocator>()) {}
+    explicit BasicHeapStore(const Allocator& alloc)
+        : Store<Allocator>(new HeapStoreImpl<Allocator>(alloc)) {}
+
+    inline allocator_type get_allocator() const {
+        return static_cast<HeapStoreImpl<Allocator>*>(this->_impl.get())->get_allocator();
+    }
+
+    // Bring base class methods into scope to avoid hiding
+    using Store<Allocator>::put;
+    using Store<Allocator>::get;
+    using Store<Allocator>::remove;
+    using Store<Allocator>::exists;
+
+    // Convenience overloads for put
+    inline bool put(const uint8_t* key, uint8_t key_len, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+        return static_cast<HeapStoreImpl<Allocator>*>(this->_impl.get())->put(key, key_len, data, len, ttl, ts);
+    }
+
+    inline bool put(const char* key, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+        return put((const uint8_t*)key, (uint8_t)strlen(key), data, len, ttl, ts);
+    }
+
+    inline bool put(const std::vector<uint8_t>& key, const void* data, uint16_t len, uint32_t ttl = 0, uint32_t ts = microStore::time()) {
+        return put(key.data(), (uint8_t)key.size(), data, len, ttl, ts);
+    }
+
+    // Convenience overloads for get
+    inline bool get(const uint8_t* key, uint8_t key_len, void* out, uint16_t* size) {
+        return static_cast<HeapStoreImpl<Allocator>*>(this->_impl.get())->get(key, key_len, out, size);
+    }
+
+    inline bool get(const char* key, void* out, uint16_t* size) {
+        return get((const uint8_t*)key, (uint8_t)strlen(key), out, size);
+    }
+
+    inline bool get(const std::vector<uint8_t>& key, void* out, uint16_t* size) {
+        return get(key.data(), (uint8_t)key.size(), out, size);
+    }
+
+    // Convenience overloads for remove
+    inline bool remove(const char* key) {
+        return this->remove(std::vector<uint8_t>((const uint8_t*)key, (const uint8_t*)key + strlen(key)));
+    }
+
+    inline bool remove(const uint8_t* key, uint8_t key_len) {
+        return this->remove(std::vector<uint8_t>(key, key + key_len));
+    }
+
+    // Convenience overloads for exists
+    inline bool exists(const char* key) {
+        return this->exists(std::vector<uint8_t>((const uint8_t*)key, (const uint8_t*)key + strlen(key)));
+    }
+
+    inline bool exists(const uint8_t* key, uint8_t key_len) {
+        return this->exists(std::vector<uint8_t>(key, key + key_len));
+    }
+
+    // Iterator support - use concrete HeapStoreImpl iterator for backward compatibility
+    using iterator = typename HeapStoreImpl<Allocator>::iterator;
+
+    iterator begin() {
+        return static_cast<HeapStoreImpl<Allocator>*>(this->_impl.get())->begin();
+    }
+
+    iterator end() {
+        return static_cast<HeapStoreImpl<Allocator>*>(this->_impl.get())->end();
+    }
+
+    // Disable heap allocation
+    void* operator new(size_t) = delete;
 };
 
 using HeapStore = BasicHeapStore<>;
