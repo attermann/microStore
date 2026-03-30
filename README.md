@@ -19,6 +19,9 @@ Advanced header-only KV store for embedded filesystems that follows the log-stru
 - automatic size-based eviction (keep N most recent records)
 - support for custom memory allocator
 
+## FileStore Configuration
+
+
 ## Known Issues
 
 ### Bug in esp_littlefs on flash full

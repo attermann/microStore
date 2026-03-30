@@ -30,25 +30,25 @@ namespace microStore {
 
 /* ---------------- CONFIG ---------------- */
 
-#ifndef USTORE_MAX_VALUE_LEN
-#define USTORE_MAX_VALUE_LEN 1024
+#ifndef USTORE_DEFAULT_SEGMENT_COUNT
+#define USTORE_DEFAULT_SEGMENT_COUNT 8
 #endif
 
-#ifndef USTORE_SEGMENT_SIZE
-#define USTORE_SEGMENT_SIZE 65536
+#ifndef USTORE_DEFAULT_SEGMENT_SIZE
+#define USTORE_DEFAULT_SEGMENT_SIZE 65536
 #endif
 
-#ifndef USTORE_MAX_SEGMENTS
-#define USTORE_MAX_SEGMENTS 8
-#endif
-
-#ifndef USTORE_WRITE_BUFFER
-//#define USTORE_WRITE_BUFFER 4096
-#define USTORE_WRITE_BUFFER 512
+#ifndef USTORE_WRITE_BUFFER_SIZE
+//#define USTORE_WRITE_BUFFER_SIZE 4096
+#define USTORE_WRITE_BUFFER_SIZE 512
 #endif
 
 #ifndef USTORE_MAX_KEY_LEN
 #define USTORE_MAX_KEY_LEN 64
+#endif
+
+#ifndef USTORE_MAX_VALUE_LEN
+#define USTORE_MAX_VALUE_LEN 1024
 #endif
 
 #ifndef USTORE_MAX_FILENAME_LEN
@@ -122,9 +122,9 @@ public:
 
 	using allocator_type = Allocator;
 
-	BasicFileStore() : BasicFileStore(Allocator{}) {}
-	explicit BasicFileStore(const Allocator& alloc)
-		: _alloc(alloc), _index(map_alloc_type(_alloc)) { write_buf_pos = 0; }
+	BasicFileStore(uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT) : BasicFileStore(Allocator{}, segment_size, segment_count) {}
+	explicit BasicFileStore(const Allocator& alloc, uint32_t segment_size = USTORE_DEFAULT_SEGMENT_SIZE, uint8_t segment_count = USTORE_DEFAULT_SEGMENT_COUNT)
+		: _alloc(alloc), _segment_size(segment_size), _segment_count(segment_count), _index(map_alloc_type(_alloc)) { write_buf_pos = 0; }
 
 	~BasicFileStore()
 	{
@@ -162,7 +162,7 @@ public:
 		// Without this, after reset current_segment stays 0 and new writes
 		// overwrite previously-live segments, losing all their records.
 		uint32_t resume_seg = 0;
-		for (uint32_t i = 0; i < USTORE_MAX_SEGMENTS; i++)
+		for (uint32_t i = 0; i < _segment_count; i++)
 		{
 			char name[USTORE_MAX_FILENAME_LEN];
 			segment_name(i, name);
@@ -183,7 +183,7 @@ public:
 
 		if (index_file) index_file.close();
 
-		for(uint32_t i=0;i<USTORE_MAX_SEGMENTS;i++)
+		for(uint32_t i = 0; i < _segment_count; i++)
 		{
 			segment_name(i,name);
 			_filesystem.remove(name);
@@ -492,7 +492,7 @@ printf("[ustore] get: returning key %s with data length %u\n", bin_str(key, key_
 		uint32_t total_dead_entries = 0;
 		uint32_t total_dead_bytes = 0;
 
-		for(uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++) {
+		for(uint32_t seg = 0; seg < _segment_count; seg++) {
 			char name[USTORE_MAX_FILENAME_LEN];
 			segment_name(seg, name);
 
@@ -740,7 +740,7 @@ private:
 
 		while(len)
 		{
-			size_t space = USTORE_WRITE_BUFFER - write_buf_pos;
+			size_t space = USTORE_WRITE_BUFFER_SIZE - write_buf_pos;
 			size_t n = (len < space) ? len : space;
 
 			memcpy(write_buf+write_buf_pos, p, n);
@@ -749,7 +749,7 @@ private:
 			p += n;
 			len -= n;
 
-			if(write_buf_pos == USTORE_WRITE_BUFFER)
+			if(write_buf_pos == USTORE_WRITE_BUFFER_SIZE)
 				flush_buffer();
 		}
 	}
@@ -988,7 +988,7 @@ printf("[ustore] Opening active file: %s\n", name);
 
 	bool rotate_segment_if_needed(uint32_t write_size)
 	{
-		if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < USTORE_SEGMENT_SIZE)
+		if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < _segment_size)
 			return true;
 
 printf("[ustore] Rotating segment...\n");
@@ -998,19 +998,19 @@ printf("[ustore] Rotating segment...\n");
 
 		current_segment++;
 
-		if (current_segment >= USTORE_MAX_SEGMENTS) {
+		if (current_segment >= _segment_count) {
 			if (compact_in_cooldown &&
 				(microStore::millis() - compact_cooldown_start_ms) < USTORE_COMPACT_RETRY_MS)
 			{
 				printf("[ustore] Compact skipped: cooldown active\n");
-				current_segment = USTORE_MAX_SEGMENTS - 1;
+				current_segment = _segment_count - 1;
 				open_segment(current_segment);
 				return false;
 			}
 			if (!compact()) {
 				compact_in_cooldown       = true;
 				compact_cooldown_start_ms = microStore::millis();
-				current_segment = USTORE_MAX_SEGMENTS - 1;
+				current_segment = _segment_count - 1;
 				open_segment(current_segment);
 				return false;
 			}
@@ -1115,7 +1115,7 @@ printf("[ustore] Compaction triggered by deleted threshold\n");
 		char seg0[USTORE_MAX_FILENAME_LEN];     segment_name(0, seg0);
 
 		// Remove all existing segments, then rename tmp → seg0.
-		for (uint32_t i = 0; i < USTORE_MAX_SEGMENTS; i++) {
+		for (uint32_t i = 0; i < _segment_count; i++) {
 			char sname[USTORE_MAX_FILENAME_LEN]; segment_name(i, sname);
 			_filesystem.remove(sname);
 		}
@@ -1170,7 +1170,7 @@ printf("[ustore] Compaction triggered by deleted threshold\n");
 		printf("[ustore] Index missing — rebuilding from segment files...\n");
 		_index.clear();
 
-		for (uint32_t seg = 0; seg < USTORE_MAX_SEGMENTS; seg++)
+		for (uint32_t seg = 0; seg < _segment_count; seg++)
 		{
 			char sname[USTORE_MAX_FILENAME_LEN];
 			segment_name(seg, sname);
@@ -1233,7 +1233,7 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 		};
 		using LiveRecVec = std::vector<LiveRec, rebind_alloc<LiveRec>>;
 		rebind_alloc<LiveRec> lr_alloc(_alloc);
-		LiveRecVec per_seg[USTORE_MAX_SEGMENTS];
+		LiveRecVec per_seg[_segment_count];
 		for (auto& v : per_seg) {
 			v = LiveRecVec(lr_alloc);
 		}
@@ -1242,7 +1242,7 @@ printf("[ustore] Opening tmp file: %s\n", tmp_name);
 printf("[ustore] Calling is_ttl_expired_ with ttl: %u, ts: %u, now: %u\n", kv.second.ttl, kv.second.timestamp, microStore::time());
 			if (is_ttl_expired_(kv.second.timestamp, kv.second.ttl)) continue;
 			uint32_t seg = kv.second.segment;
-			if (seg < USTORE_MAX_SEGMENTS) {
+			if (seg < _segment_count) {
 				LiveRec lr;
 				lr.offset = kv.second.offset;
 				lr.key = kv.first;
@@ -1250,7 +1250,7 @@ printf("[ustore] Pushing segment: %u, offset: %u\n", seg, lr.offset);
 				per_seg[seg].push_back(lr);
 			}
 		}
-		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
+		for (uint32_t s = 0; s < _segment_count; s++) {
 			std::sort(per_seg[s].begin(), per_seg[s].end(), [](const LiveRec& a, const LiveRec& b) {
 				return a.offset < b.offset;
 			});
@@ -1273,7 +1273,7 @@ printf("[ustore] Pushing segment: %u, offset: %u\n", seg, lr.offset);
 		bool write_ok = true;
 		uint32_t committed_segs = 0;  // number of source segments committed to compact.tmp
 
-		for (uint32_t s = 0; s < USTORE_MAX_SEGMENTS; s++) {
+		for (uint32_t s = 0; s < _segment_count; s++) {
 			char src_name[USTORE_MAX_FILENAME_LEN]; segment_name(s, src_name);
 printf("[ustore] Processing segment: %u, size: %lu\n", s, per_seg[s].size());
 
@@ -1351,6 +1351,8 @@ private:
 	FileSystem _filesystem;
 
 	char base_prefix[32];
+	uint32_t _segment_size = USTORE_DEFAULT_SEGMENT_SIZE;
+	uint8_t _segment_count = USTORE_DEFAULT_SEGMENT_COUNT;
 
 	File active_file;
 	File index_file;
@@ -1365,7 +1367,7 @@ private:
 	uint32_t policy_ttl_secs = USTORE_DEFAULT_TTL_SECS; // 0 = TTL disabled (seconds)
 	uint32_t policy_max_recs = USTORE_DEFAULT_MAX_RECS; // 0 = max-records disabled
 
-	uint8_t write_buf[USTORE_WRITE_BUFFER];
+	uint8_t write_buf[USTORE_WRITE_BUFFER_SIZE];
 	size_t write_buf_pos;
 
 	Allocator _alloc;

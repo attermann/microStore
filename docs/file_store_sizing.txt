@@ -14,14 +14,14 @@
                                                                                                                                                                                                                       
   2. After Compaction, seg0 Is Reserved                                                                                                                                                                               
                                                                                                                                                                                                                       
-  rotate_segment_if_needed (FileStore.h:883) sets current_segment = 1 after compaction — seg0 is always the compacted base. So effective writable segments are N-1. With USTORE_MAX_SEGMENTS=8 you get 7 writable      
+  rotate_segment_if_needed (FileStore.h:883) sets current_segment = 1 after compaction — seg0 is always the compacted base. So effective writable segments are N-1. With USTORE_DEFAULT_SEGMENT_COUNT=8 you get 7 writable      
   segments before the next compaction.                                                                                                                                                                                
                                                                                                                                                                                                                       
   This means N ≥ 3 is a hard minimum for useful operation (1 compacted + 1 active + 1 slack).                                                                                                                         
                                                                                                                                                                                                                       
   3. Stack Cost in compact()                                                                                                                                                                                          
                                                                                                                                                                                                                       
-  LiveRecVec per_seg[USTORE_MAX_SEGMENTS] (FileStore.h:1053) is a stack-allocated array of vectors. On a 32-bit MCU each vector is ~12 bytes, so N=8 costs ~96 bytes — fine. But don't push N too high on systems with 
+  LiveRecVec per_seg[USTORE_DEFAULT_SEGMENT_COUNT] (FileStore.h:1053) is a stack-allocated array of vectors. On a 32-bit MCU each vector is ~12 bytes, so N=8 costs ~96 bytes — fine. But don't push N too high on systems with 
   small stacks.                                                                                                                                                                                                       
                                                                                                                                                                                                                       
   ---                                                                                                                                                                                                                 
@@ -65,7 +65,7 @@
   ---
   The One Invariant to Hold
 
-  S > USTORE_MAX_VALUE_LEN + sizeof(RecordHeader) + USTORE_MAX_KEY_LEN + sizeof(RecordCommit) + USTORE_WRITE_BUFFER
+  S > USTORE_MAX_VALUE_LEN + sizeof(RecordHeader) + USTORE_MAX_KEY_LEN + sizeof(RecordCommit) + USTORE_WRITE_BUFFER_SIZE
     = max_value + 16 + 64 + 4 + 4096  (defaults)
     ≈ max_value + 4180
 
@@ -96,7 +96,7 @@
   Step 1 — Fix K (your policy_max_recs_). This is the design input: how many unique keys does your application actually need?                                                                                         
                                                                                                                                                                                                                       
   Step 2 — Choose S based on records-per-segment, not capacity:                                                                                                                                                       
-  S = roundup_pow2( max(2 × USTORE_WRITE_BUFFER,  M × R) )                                                                                                                                                             
+  S = roundup_pow2( max(2 × USTORE_WRITE_BUFFER_SIZE,  M × R) )                                                                                                                                                             
   where M is a target records-per-segment (e.g. 32–64). Smaller M means more frequent rotation and compaction; the write buffer sets a floor. On constrained flash, align S to the erase block size.                  
                                                                                                                                                                                                                       
   Step 3 — Derive N from the flash constraint:                                                                                                                                                                        
@@ -127,7 +127,7 @@
   L = 500 × 100 = 50,000 B  (~49 KB)                                                                                                                                                                                  
   Available for segments = 512 KB − 49 KB = 463 KB
   S = roundup_pow2(max(8192, 32×100)) = roundup_pow2(8192) = 8192  (8 KB)                                                                                                                                             
-  N = floor(463 KB / 8 KB) = 57  → cap at USTORE_MAX_SEGMENTS if needed                                                                                                                                                
+  N = floor(463 KB / 8 KB) = 57  → cap at USTORE_DEFAULT_SEGMENT_COUNT if needed                                                                                                                                                
                                                                                                                                                                                                                       
   With N=8, S=32KB instead (more typical):                                                                                                                                                                            
   N×S = 256 KB,  K×R = 49 KB,  peak = 305 KB < 512 KB  ✓                                                                                                                                                              
@@ -174,7 +174,7 @@
   ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
   │ 1 MB      │ 4 KB      │ 64 KB  │ 8   │ 7,645    │ 2,797     │ 837       │ Default S and N                                          │
   ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
-  │ 2 MB      │ 4 KB      │ 64 KB  │ 16  │ 16,384   │ 5,994     │ 1,793     │ Increase USTORE_MAX_SEGMENTS                              │
+  │ 2 MB      │ 4 KB      │ 64 KB  │ 16  │ 16,384   │ 5,994     │ 1,793     │ Increase USTORE_DEFAULT_SEGMENT_COUNT                              │
   ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
   │ 4 MB      │ 4 KB      │ 64 KB  │ 32  │ 33,860   │ 12,388    │ 3,706     │                                                          │
   ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
@@ -190,9 +190,9 @@
   ---                                                                                                                                                                                                                 
   Key Observations                                      
                                                                                                                                                                                                                       
-  28 KB requires reducing USTORE_WRITE_BUFFER from 4 KB to 1 KB; otherwise the write buffer alone exceeds any viable segment size.
+  28 KB requires reducing USTORE_WRITE_BUFFER_SIZE from 4 KB to 1 KB; otherwise the write buffer alone exceeds any viable segment size.
                                                                                                                                                                                                                       
-  8 MB+ — per_seg[USTORE_MAX_SEGMENTS] in compact() is stack-allocated. At N=96 that's ~1.1 KB of vector headers on the stack, which may be a concern on MCUs with 4–8 KB stacks. For 12 MB+ consider making it        
+  8 MB+ — per_seg[USTORE_DEFAULT_SEGMENT_COUNT] in compact() is stack-allocated. At N=96 that's ~1.1 KB of vector headers on the stack, which may be a concern on MCUs with 4–8 KB stacks. For 12 MB+ consider making it        
   heap-allocated.                                                                                                                                                                                                     
                                                                                                                                                                                                                       
   Practical K: for most embedded applications, K will be far below K_max. The table gives a hard ceiling. Setting policy_max_recs_ at 50–70% of K_max leaves comfortable compaction headroom and avoids operating at  
@@ -215,12 +215,12 @@
   void append_buffer(const uint8_t* data, size_t len)
   {                                                                                                                                                                                                                   
       while(len) {                                                                                                                                                                                                    
-          size_t space = USTORE_WRITE_BUFFER - write_buf_pos;                                                                                                                                                         
+          size_t space = USTORE_WRITE_BUFFER_SIZE - write_buf_pos;                                                                                                                                                         
           size_t n = (len < space) ? len : space;                                                                                                                                                                     
           memcpy(write_buf+write_buf_pos, p, n);                                                                                                                                                                      
           write_buf_pos += n;                                                                                                                                                                                         
           p += n; len -= n;                                                                                                                                                                                           
-          if(write_buf_pos == USTORE_WRITE_BUFFER)                                                                                                                                                                    
+          if(write_buf_pos == USTORE_WRITE_BUFFER_SIZE)                                                                                                                                                                    
               flush_buffer();                                                                                                                                                                                         
       }
   }                                                                                                                                                                                                                   
@@ -336,7 +336,7 @@
                   
   Negative Consequences of N↑ S↓                                                
    
-  There's one real cost: the per_seg[USTORE_MAX_SEGMENTS] array in compact() is 
+  There's one real cost: the per_seg[USTORE_DEFAULT_SEGMENT_COUNT] array in compact() is 
   stack-allocated (line 1188). Each std::vector is ~12–24 bytes on 32-bit ARM.
   At N=32 that's ~768 B of stack; at N=64 it's ~1.5 KB. On MCUs with 4–8 KB     
   stacks this becomes a genuine concern.

@@ -73,9 +73,9 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 | Macro | Default | Meaning |
 |-------|---------|---------|
 | `USTORE_MAX_VALUE_LEN` | 1024 | Max value size in bytes |
-| `USTORE_SEGMENT_SIZE` | 65536 | Per-segment file size limit |
-| `USTORE_MAX_SEGMENTS` | 8 | Max number of segments |
-| `USTORE_WRITE_BUFFER` | 4096 | Write buffer size |
+| `USTORE_DEFAULT_SEGMENT_SIZE` | 65536 | Per-segment file size limit |
+| `USTORE_DEFAULT_SEGMENT_COUNT` | 8 | Max number of segments |
+| `USTORE_WRITE_BUFFER_SIZE` | 4096 | Write buffer size |
 | `USTORE_MAX_KEY_LEN` | 64 | Max key length in bytes |
 | `USTORE_COMPACT_RETRY_MS` | 60000 | Compaction cooldown (ms) |
 

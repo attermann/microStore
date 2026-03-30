@@ -3,7 +3,7 @@
 ## Background
 
 microStore uses an append-only segmented log: records are written to up to
-`USTORE_MAX_SEGMENTS` (default 8) segment files of `USTORE_SEGMENT_SIZE` (default 65 536 B) each.
+`USTORE_DEFAULT_SEGMENT_COUNT` (default 8) segment files of `USTORE_DEFAULT_SEGMENT_SIZE` (default 65 536 B) each.
 When all segments are full, **compaction** is triggered: live records are copied to a temporary
 file, all source segments are deleted, and the temporary file is renamed to segment 0.
 
@@ -13,7 +13,7 @@ The original compaction wrote the entire live-record set to `compact.tmp` **befo
 source segment.  At the moment of peak overlap, the filesystem held:
 
 ```
-8 × USTORE_SEGMENT_SIZE (sources)  +  compact.tmp (up to 8 × USTORE_SEGMENT_SIZE)
+8 × USTORE_DEFAULT_SEGMENT_SIZE (sources)  +  compact.tmp (up to 8 × USTORE_DEFAULT_SEGMENT_SIZE)
 ```
 
 In the worst case — all records live, all 8 segments full — this required ~2× the live-data size,
@@ -109,9 +109,9 @@ At the moment when segment *S* is being processed:
 
 | On disk | Size |
 |---------|------|
-| compact.tmp (records from segments 0..S-1) | ≤ S × USTORE_SEGMENT_SIZE |
-| segment[S] (current source, not yet deleted) | ≤ USTORE_SEGMENT_SIZE |
-| segments S+1..7 (not yet touched) | ≤ (MAX_SEGMENTS − S − 1) × USTORE_SEGMENT_SIZE |
+| compact.tmp (records from segments 0..S-1) | ≤ S × USTORE_DEFAULT_SEGMENT_SIZE |
+| segment[S] (current source, not yet deleted) | ≤ USTORE_DEFAULT_SEGMENT_SIZE |
+| segments S+1..7 (not yet touched) | ≤ (MAX_SEGMENTS − S − 1) × USTORE_DEFAULT_SEGMENT_SIZE |
 
 The simultaneous overhead is always **at most one extra segment** on top of the total live data
 size — compared to up to eight extra segments with the old design.
@@ -176,10 +176,10 @@ After the rename, the filesystem holds:
 
 | File | Size |
 |------|------|
-| segment_0.dat (renamed compact.tmp) | ≤ (next_seg) × USTORE_SEGMENT_SIZE |
-| segments next_seg..7 | ≤ (MAX_SEGMENTS − next_seg) × USTORE_SEGMENT_SIZE |
+| segment_0.dat (renamed compact.tmp) | ≤ (next_seg) × USTORE_DEFAULT_SEGMENT_SIZE |
+| segments next_seg..7 | ≤ (MAX_SEGMENTS − next_seg) × USTORE_DEFAULT_SEGMENT_SIZE |
 
-Total ≤ `MAX_SEGMENTS × USTORE_SEGMENT_SIZE` — no additional space is required beyond what was
+Total ≤ `MAX_SEGMENTS × USTORE_DEFAULT_SEGMENT_SIZE` — no additional space is required beyond what was
 already occupied at the time of the crash.
 
 ---
