@@ -37,7 +37,7 @@ namespace microStore { namespace Adapters {
 class PosixFileSystem : public microStore::FileSystem {
 
 public:
-	PosixFileSystem() : microStore::FileSystem(new FileSystemImpl()) {}
+	PosixFileSystem(const char* basepath = "") : microStore::FileSystem(new FileSystemImpl(basepath)) {}
     virtual ~PosixFileSystem() {}
 
     // Disable heap allocation
@@ -197,7 +197,7 @@ protected:
 	class FileSystemImpl : public microStore::FileSystemImpl {
 
 	public:
-		FileSystemImpl() {}
+		FileSystemImpl(const char* basepath) : _basepath(basepath) {}
 	    virtual ~FileSystemImpl() {}
 
 	public:
@@ -217,7 +217,7 @@ protected:
 			printf("[ustore] Initializing PosixFileSystem\n");
 #if defined(ESP32)
 			// Initialize LittleFS for POSIX file access
-			if (!LittleFS.begin(true, "")) {
+			if (!LittleFS.begin(true, _basepath)) {
 				printf("[ustore] Failed to initialize PosixFileSystem!\n");
 				return false;
 			}
@@ -352,6 +352,8 @@ protected:
 #endif
 		}
 
+	private:
+		const char* _basepath = "";
 	};
 
 };

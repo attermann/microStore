@@ -14,64 +14,25 @@
 
 #pragma once
 
-#if defined(USTORE_USE_FLASHFS)
+#if defined(USTORE_USE_SD)
 
 #include "../File.h"
 #include "../FileSystem.h"
 
-#include <Cached_SPIFlash.h>
-#include <FlashFileSystem.h>
+#include <SPI.h>
+#include <SD.h>
+#ifdef SDFileSystem
+#undef SDFileSystem
+#endif
 
 namespace microStore { namespace Adapters {
 
-// Flash definition structure for RAK15001
-// Settings for the Gigadevice GD25Q16C 2MiB SPI flash.
-// Datasheet: http://www.gigadevice.com/datasheet/gd25q16c/
-#define RAK15001							\
-{											\
-	.total_size = (1UL << 21),				\
-	.start_up_time_us = 5000,				\
-	.manufacturer_id = 0xc8,				\
-	.memory_type = 0x40,					\
-	.capacity = 0x15,						\
-	.max_clock_speed_mhz = 15,				\
-	.quad_enable_bit_mask = 0x00,			\
-	.has_sector_protection = false,			\
-	.supports_fast_read = true,				\
-	.supports_qspi = false,					\
-	.supports_qspi_writes = false,			\
-	.write_status_register_split = false,	\
-	.single_status_byte = true,				\
-	.is_fram = false,						\
-}
 
-// Flash definition structure for RAK15007
-// https://www.infineon.com/assets/row/public/documents/10/49/infineon-cy15b108qn-cy15v108qn-8mb-excelon-lp-ferroelectric-ram-f-ram-serial-spi-1024k-8-40-mhz-industrial-datasheet-en.pdf
-// RDID has continuation code: 7F-C2-2E-00
-#define RAK15007							\
-{											\
-	.total_size = 1024UL * 1024,			\
-	.start_up_time_us = 5000,				\
-	.manufacturer_id = 0x7F,				\
-	.memory_type = 0x2e,					\
-	.capacity = 0x05,						\
-	.max_clock_speed_mhz = 40,				\
-	.quad_enable_bit_mask = 0x00,			\
-	.has_sector_protection = false,			\
-	.supports_fast_read = true,				\
-	.supports_qspi = false,					\
-	.supports_qspi_writes = true,			\
-	.write_status_register_split = false,	\
-	.single_status_byte = true,				\
-	.is_fram = true,						\
-}
-
-
-class FlashFSFileSystem : public microStore::FileSystem {
+class SDFileSystem : public microStore::FileSystem {
 
 public:
-	FlashFSFileSystem(const SPIFlash_Device_t* device, uint8_t ss = SS) : microStore::FileSystem(new FileSystemImpl(device, ss)) {}
-    virtual ~FlashFSFileSystem() {}
+	SDFileSystem(int8_t sck = -1, int8_t miso = -1, int8_t mosi = -1, int8_t ss = -1, uint8_t spi_bus = HSPI) : microStore::FileSystem(new FileSystemImpl(sck, miso, mosi, ss, spi_bus)) {}
+    virtual ~SDFileSystem() {}
 
     // Disable heap allocation
     void* operator new(std::size_t) = delete;
@@ -83,11 +44,11 @@ protected:
 	class FileImpl : public microStore::FileImpl {
 
 	private:
-		std::unique_ptr<Adafruit_SPIFlash_LittleFS::File> _file;
+		std::unique_ptr<fs::File> _file;
 		bool _closed = false;
 
 	public:
-		FileImpl(Adafruit_SPIFlash_LittleFS::File* file) : microStore::FileImpl(), _file(file) {}
+		FileImpl(fs::File* file) : microStore::FileImpl(), _file(file) {}
 		virtual ~FileImpl() { if (!_closed) close(); }
 
 	public:
@@ -104,17 +65,17 @@ protected:
 		inline virtual int peek() { return _file->peek(); }
 		inline virtual size_t tell() { return _file->position(); }
 		inline virtual long seek(uint32_t pos, microStore::SeekMode mode) {
-			uint8_t smode;
+			fs::SeekMode smode;
 			switch (mode) {
 				case microStore::SeekMode::SeekModeCur:
-					smode = Adafruit_SPIFlash_LittleFS::SEEK_O_CUR;
+					smode = fs::SeekCur;
 					break;
 				case microStore::SeekMode::SeekModeEnd:
-					smode = Adafruit_SPIFlash_LittleFS::SEEK_O_END;
+					smode = fs::SeekEnd;
 					break;
 				case microStore::SeekMode::SeekModeSet:
 				default:
-					smode = Adafruit_SPIFlash_LittleFS::SEEK_O_SET;
+					smode = fs::SeekSet;
 					break;
 			}
 			return _file->seek(pos, smode);
@@ -128,31 +89,27 @@ protected:
 	class FileSystemImpl : public microStore::FileSystemImpl {
 
 	public:
-		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss = SS) : _device(device), _transport(ss, SPI), _flash(&_transport) {}
+		FileSystemImpl(int8_t sck = -1, int8_t miso = -1, int8_t mosi = -1, int8_t ss = -1, uint8_t spi_bus = HSPI) : _sck(sck), _miso(miso), _mosi(mosi), _ss(ss), _spi(spi_bus) {}
 	    virtual ~FileSystemImpl() {}
 
 	public:
 
 		virtual bool format() override {
-			if (!FlashFS.format()) {
+			/*
+			if (!SD.format()) {
 				return false;
 			}
+			*/
 			return true;
 		}
 
 		virtual bool init() override {
-			printf("[ustore] Initializing FlashFSFileSystem\n");
-			// Initialize FlashFSFileSystem
-			if (!_device) {
-				printf("[ustore] No flash device specified for FlashFSFileSystem!\n");
-				return false;
-			}
-			if (!_flash.begin(_device)) {
-				printf("[ustore] Failed to initialize device for FlashFSFileSystem!\n");
-				return false;
-			}
-			if (!FlashFS.begin(&_flash)) {
-				printf("[ustore] Failed to initialize FlashFSFileSystem!\n");
+			printf("[ustore] Initializing SDFileSystem\n");
+			// Initialize SDFileSystem
+			pinMode(_miso, INPUT_PULLUP);
+			_spi.begin(_sck, _miso, _mosi, _ss);
+			if (!SD.begin(_ss, _spi)) {
+				printf("[ustore] Failed to initialize SD card for SDFileSystem!\n");
 				return false;
 			}
 	/*
@@ -169,44 +126,35 @@ protected:
 
 
 		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
-			int pmode;
+			const char* pmode;
 			switch (mode) {
 				// Read only. File must exist. ("r")
 				case microStore::File::ModeRead:
-					pmode = Adafruit_SPIFlash_LittleFS::FILE_O_READ;
+					pmode = FILE_READ;
 					break;
 				// Write only. Creates file or truncates existing file. ("w")
 				case microStore::File::ModeWrite:
-					pmode = Adafruit_SPIFlash_LittleFS::FILE_O_WRITE;
-					// CBA TODO Replace remove with working truncation
-					if (FlashFS.exists(path)) {
-						FlashFS.remove(path);
-					}
+					pmode = FILE_WRITE;
 					break;
 				// Append only. Creates file if it doesn’t exist. Writes go to end. ("a")
 				case microStore::File::ModeAppend:
-					// CBA Append is the default write mode for nordicnrf52 LittleFS
-					pmode = Adafruit_SPIFlash_LittleFS::FILE_O_WRITE;
+					pmode = FILE_APPEND;
 					break;
 				// Read and write. Creates file or truncates existing file. ("w+")
 				case microStore::File::ModeReadWrite:
-					pmode = Adafruit_SPIFlash_LittleFS::FILE_O_READ | Adafruit_SPIFlash_LittleFS::FILE_O_WRITE;
-					// CBA TODO Replace remove with working truncation
-					if (FlashFS.exists(path)) {
-						FlashFS.remove(path);
-					}
+					pmode = "w+";
 					break;
 				// Read and append. Creates file if it doesn’t exist. ("a+")
 				case microStore::File::ModeReadAppend:
-					// CBA Append is the default write mode for nordicnrf52 LittleFS
-					pmode = Adafruit_SPIFlash_LittleFS::FILE_O_READ | Adafruit_SPIFlash_LittleFS::FILE_O_WRITE;
+					pmode = "a+";
 					break;
 				// Read and write. File must exist. ("r+") ???
 				default:
 					return {};
 			}
-			Adafruit_SPIFlash_LittleFS::File* file = new Adafruit_SPIFlash_LittleFS::File(FlashFS);
-			if (!file->open(path, pmode)) {
+			// CBA Using copy constructor to obtain File*
+			fs::File* file = new fs::File(SD.open(path, pmode));
+			if (!file) {
 				return {};
 			}
 			// Seek to beginning to overwrite (this is failing on nrf52)
@@ -219,26 +167,26 @@ protected:
 
 
 		virtual bool exists(const char* path) override {
-			return FlashFS.exists(path);
+			return SD.exists(path);
 		}
 
 		virtual bool remove(const char* path) override {
-			return FlashFS.remove(path);
+			return SD.remove(path);
 		}
 
 		virtual bool rename(const char* from_path, const char* to_path) override {
-			return FlashFS.rename(from_path, to_path);
+			return SD.rename(from_path, to_path);
 		}
 
 		virtual bool mkdir(const char* path) override {
-			if (!FlashFS.mkdir(path)) {
+			if (!SD.mkdir(path)) {
 				return false;
 			}
 			return true;
 		}
 
 		virtual bool rmdir(const char* path) override {
-			if (!FlashFS.rmdir_r(path)) {
+			if (!SD.rmdir(path)) {
 				return false;
 			}
 			return true;
@@ -246,8 +194,8 @@ protected:
 
 
 		virtual bool isDirectory(const char* path) override {
-			Adafruit_SPIFlash_LittleFS::File file(FlashFS);
-			if (file.open(path, Adafruit_SPIFlash_LittleFS::FILE_O_READ)) {
+			fs::File file = SD.open(path, FILE_READ);
+			if (file) {
 				bool is_directory = file.isDirectory();
 				file.close();
 				return is_directory;
@@ -257,11 +205,11 @@ protected:
 
 		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
-			Adafruit_SPIFlash_LittleFS::File root = FlashFS.open(path);
+			fs::File root = SD.open(path);
 			if (!root) {
 				return files;
 			}
-			Adafruit_SPIFlash_LittleFS::File file = root.openNextFile();
+			fs::File file = root.openNextFile();
 			while (file) {
 				if (!file.isDirectory()) {
 					char* name = (char*)file.name();
@@ -277,17 +225,20 @@ protected:
 		}
 
 		virtual size_t storageSize() override {
-			return FlashFS.totalBytes();
+			//return SD.cardSize();
+			return SD.totalBytes();
 		}
 
 		virtual size_t storageAvailable() override {
-			return (FlashFS.totalBytes() - FlashFS.usedBytes());
+			return (SD.totalBytes() - SD.usedBytes());
 		}
 
 	private:
-		const SPIFlash_Device_t* _device = nullptr;
-		Adafruit_FlashTransport_SPI _transport;
-		Cached_SPIFlash _flash;
+		int8_t _sck = -1;
+		int8_t _miso = -1;
+		int8_t _mosi = -1;
+		int8_t _ss = -1;
+		SPIClass _spi;
 	};
 
 };

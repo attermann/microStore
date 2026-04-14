@@ -44,6 +44,9 @@
 #if defined(USTORE_USE_FLASHFS)
 #include "microStore/Adapters/FlashFSFileSystem.h"
 #endif
+#if defined(USTORE_USE_SD)
+#include "microStore/Adapters/SDFileSystem.h"
+#endif
 #if defined(USTORE_USE_UNIVERSALFS)
 #include "microStore/Adapters/UniversalFileSystem.h"
 #endif
