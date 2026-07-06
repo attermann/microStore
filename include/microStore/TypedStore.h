@@ -145,4 +145,6 @@ private:
     Store& store;
 };
 
+template<typename Key, typename Store>
+using TypedKeyStore = TypedStore<Key, Empty, Store>;
 }

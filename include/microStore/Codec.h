@@ -81,4 +81,14 @@ struct Codec<std::vector<uint8_t>>
 	}
 };
 
+// Monostate value type for key-only ("set") stores — see TypedKeyStore in TypedStore.h.
+struct Empty {};
+
+template<>
+struct Codec<Empty>
+{
+	static std::vector<uint8_t> encode(const Empty&) { return {}; }
+	static bool decode(const std::vector<uint8_t>&, Empty&) { return true; }
+};
+
 }

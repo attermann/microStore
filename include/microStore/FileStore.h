@@ -155,7 +155,7 @@ public:
 			size_t n = strlen(base_prefix);
 			if (n > 0 && base_prefix[n - 1] == '/') {
 				base_prefix[n - 1] = '\0';
-				USTORE_LOG("[ustore] init: Creating directory %s\n", base_prefix);
+				USTORE_LOG("[ustore] init: will create directory %s if necessary\n", base_prefix);
 				if (!_filesystem.mkdir(base_prefix)) USTORE_LOG("[ustore] init: Failed to create directory %s\n", base_prefix);
 				base_prefix[n - 1] = '/';
 			}
@@ -170,9 +170,12 @@ public:
 		if (!load_index())
 			rebuild_index_from_segments();
 
+		// Clean the store at init
+		sweep();
+
 		// Enforce max_recs at boot: prune excess entries and rewrite the
 		// persistent index so evicted keys don't reappear on the next reboot.
-		size_t pruned = prune_index_to_max_recs_();
+		size_t pruned = prune_index_to_max_recs();
 		if (pruned > 0) {
 			char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
 			_filesystem.remove(iname);
@@ -194,6 +197,8 @@ public:
 		}
 
 		open_segment(resume_seg);
+
+		USTORE_LOG("[ustore] init: FileStore initialized with %u active records\n", size());
 
 		return true;
 	}
@@ -257,7 +262,7 @@ public:
 			return false;
 		}
 
-USTORE_LOG("[ustore] put: storing key %s with data len %u\n", bin_str(key, key_len), len);
+USTORE_LOG("[ustore] put: storing key=%s ttl=%u, ts=%u with data len %u\n", bin_str(key, key_len), ttl, ts, len);
 		if (key_len > USTORE_MAX_KEY_LEN) {
 			USTORE_LOG("[ustore] put: failed due to excessive key length: %u\n", key_len);
 			return false;
@@ -303,15 +308,17 @@ USTORE_LOG("[ustore] put: storing key %s with data len %u\n", bin_str(key, key_l
 		}
 
 		// If an existing record was updated then increment _dead_since_compact
-		if (index_find(key, key_len)) _dead_since_compact++;
+		bool key_exists = index_find(key, key_len) != nullptr;
+		if (key_exists) _dead_since_compact++;
+
+		// Enforce max_recs: if inserting a NEW key would push us over the limit,
+		// evict the oldest record(s) BEFORE insert so the just-written key can't
+		// be selected as its own eviction victim on timestamp ties. Orphaned disk
+		// records will be reclaimed at the next compaction.
+		if (!key_exists && policy_max_recs > 0 && _index.size() >= policy_max_recs)
+			prune_index_to_max_recs(policy_max_recs - 1);
 
 		index_insert(key, key_len, current_segment, offset, ts, ttl);
-
-		// Enforce max_recs: evict the oldest record(s) from the in-memory index
-		// when a new key pushes the count over the limit. Orphaned disk records
-		// will be reclaimed at the next compaction.
-		if (policy_max_recs > 0 && _index.size() > policy_max_recs)
-			prune_index_to_max_recs_();
 
 		persist_index_entry(key, key_len, current_segment, offset, ts, ttl);
 //USTORE_LOG("[ustore] put: key %s offset %u\n", bin_str(key, key_len), offset);
@@ -379,7 +386,7 @@ USTORE_LOG("[ustore] get: fetching key %s with data size %u\n", bin_str(key, key
 		}
 //USTORE_LOG("[ustore] get: key %s offset %lu\n", bin_str(key, key_len), e->offset);
 
-		if (is_ttl_expired_(e->timestamp, e->ttl)) {
+		if (is_ttl_expired(e->timestamp, e->ttl)) {
 			index_remove(key, key_len);
 			USTORE_LOG("[ustore] get: key %s expired by TTL\n", bin_str(key, key_len));
 			return false;
@@ -499,7 +506,18 @@ USTORE_LOG("[ustore] get: returning key %s with data length %u\n", bin_str(key, 
 			return false;
 		}
 
-		if(key_len > USTORE_MAX_KEY_LEN) return false;
+USTORE_LOG("[ustore] remove: removing key %s\n", bin_str(key, key_len));
+		if (key_len > USTORE_MAX_KEY_LEN) {
+			USTORE_LOG("[ustore] remove: failed due to excessive key length: %u\n", key_len);
+			return false;
+		}
+
+		// CBA TODO Determine whether we should short-circuit here is the key already does not exist
+		IndexValue* e = index_find(key, key_len);
+		if (!e) {
+			USTORE_LOG("[ustore] remove: key %s not found in index\n", bin_str(key, key_len));
+			return false;
+		}
 
 		RecordHeader hdr;
 		hdr.magic = MAGIC_RECORD;
@@ -552,10 +570,27 @@ USTORE_LOG("[ustore] get: returning key %s with data length %u\n", bin_str(key, 
 			USTORE_LOG("[ustore] exists: store is invalid\n");
 			return false;
 		}
-		if(key_len > USTORE_MAX_KEY_LEN) return false;
+
+USTORE_LOG("[ustore] exists: checking key %s\n", bin_str(key, key_len));
+
+		if (key_len > USTORE_MAX_KEY_LEN) {
+			USTORE_LOG("[ustore] exists: failed due to excessive key length: %u\n", key_len);
+			return false;
+		}
+
 		IndexValue* e = index_find(key, key_len);
-		if (!e) return false;
-		if (is_ttl_expired_(e->timestamp, e->ttl)) { index_remove(key, key_len); return false; }
+		if (!e) {
+			USTORE_LOG("[ustore] exists: key %s not found in index\n", bin_str(key, key_len));
+			return false;
+		}
+
+		if (is_ttl_expired(e->timestamp, e->ttl)) {
+			index_remove(key, key_len);
+			USTORE_LOG("[ustore] exists: key %s expired by TTL\n", bin_str(key, key_len));
+			return false;
+		}
+USTORE_LOG("[ustore] exists: found key %s\n", bin_str(key, key_len));
+
 		return true;
 	}
 
@@ -906,30 +941,61 @@ private:
 
 	/* -------- POLICY HELPERS -------- */
 
-	bool is_ttl_expired_(uint32_t ts, uint32_t record_ttl) const
+	// Clean out any records with timestamp in the future.
+	size_t sweep()
+	{
+		size_t evicted = 0;
+		uint32_t current_time = microStore::time();
+		using KTSAlloc = rebind_alloc<KeyType>;
+		KTSAlloc kts_alloc(_alloc);
+		std::vector<KeyType, KTSAlloc> evict(kts_alloc);
+		evict.reserve(_index.size());
+		for (auto& kv : _index) {
+			if (kv.second.timestamp > current_time) {
+				USTORE_LOG("[ustore] sweep: removing record with timestamp %u seconds in the future\n", kv.second.timestamp - current_time);
+				evict.push_back(kv.first);
+			}
+		}
+		for (auto& key : evict) {
+			_index.erase(key);
+			++evicted;
+		}
+		// Record(s) evicted so increment _dead_since_compact
+		_dead_since_compact += evicted;
+		if (evicted > 0) USTORE_LOG("[ustore] sweep: evicted %lu records\n", evicted);
+		return evicted;
+	}
+
+	bool is_ttl_expired(uint32_t ts, uint32_t record_ttl) const
 	{
 		uint32_t effective_ttl = (record_ttl > 0) ? record_ttl : policy_ttl_secs;
 		return effective_ttl > 0 && microStore::time() > ts && (microStore::time() - ts) >= effective_ttl;
 	}
 
-	// Evict the oldest records (by timestamp) until _index.size() <= policy_max_recs.
+	// Evict the oldest records (by timestamp) until _index.size() <= target.
+	// If target is 0 (default) policy_max_recs is used; pass a smaller target
+	// from put() to make room for a new key before insert so the new key can't
+	// be picked as its own eviction victim on timestamp ties.
 	// Returns the number of entries evicted.
 	// When to_evict == 1 (the common put() path), a simple O(n) scan is used to
 	// avoid heap allocation.  When to_evict > 1 (init / compact), a partial sort
 	// is used to evict all excess entries in a single pass.
-	size_t prune_index_to_max_recs_()
+	size_t prune_index_to_max_recs(uint32_t target = 0)
 	{
-		if (policy_max_recs == 0 || _index.size() <= policy_max_recs) return 0;
+		if (target == 0) target = policy_max_recs;
+		if (target == 0 || _index.size() <= target) return 0;
 
-		size_t to_evict = _index.size() - policy_max_recs;
+		size_t to_evict = _index.size() - target;
 
 		if (to_evict == 1) {
 			// Fast path: single linear scan for the oldest entry.
 			auto oldest = _index.begin();
-			for (auto it = _index.begin(); it != _index.end(); ++it)
+			for (auto it = _index.begin(); it != _index.end(); ++it) {
 				if (it->second.timestamp < oldest->second.timestamp) oldest = it;
+			}
 			_index.erase(oldest);
-		} else {
+		}
+		else {
 			// Bulk path: collect (timestamp, key) pairs, partial-sort, then erase.
 			using KTSPair = std::pair<uint32_t, KeyType>;
 			using KTSAlloc = rebind_alloc<KTSPair>;
@@ -946,7 +1012,7 @@ private:
 		}
 		// Record(s) evicted so increment _dead_since_compact
 		_dead_since_compact += to_evict;
-USTORE_LOG("[ustore] Evicted %lu records to policy_max_recs\n", to_evict);
+USTORE_LOG("[ustore] prune_index_to_max_recs: evicted %lu records to policy_max_recs\n", to_evict);
 
 		return to_evict;
 	}
@@ -1115,7 +1181,7 @@ USTORE_LOG("[ustore] Closing active file\n");
 		char name[USTORE_MAX_FILENAME_LEN];
 		segment_name(id,name);
 
-USTORE_LOG("[ustore] Opening active file: %s\n", name);
+USTORE_LOG("[ustore] open_segment: opening active file: %s\n", name);
 		active_file = _filesystem.open(name, File::ModeReadAppend);
 		if (!active_file) {
 			USTORE_LOG("[ustore] ERROR: Failed to open active file: %s\n", name);
@@ -1132,11 +1198,11 @@ USTORE_LOG("[ustore] Opening active file: %s\n", name);
 		if (current_offset + write_size + sizeof(RecordHeader) + sizeof(RecordCommit) < _segment_size)
 			return true;
 
-USTORE_LOG("[ustore] Rotating segment...\n");
+USTORE_LOG("[ustore] rotate_segment_if_needed: rotating segment...\n");
 		flush_buffer();
 
 		if (active_file) {
-USTORE_LOG("[ustore] Closing active file\n");
+USTORE_LOG("[ustore] rotate_segment_if_needed: closing active file\n");
 			active_file.close();
 		}
 
@@ -1195,7 +1261,7 @@ USTORE_LOG("[ustore] Closing active file\n");
 #if USTORE_COMPACT_THRESHOLD > 0
 		uint32_t total = (uint32_t)_index.size() + _dead_since_compact;
 		if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
-USTORE_LOG("[ustore] Compaction triggered by deleted threshold\n");
+USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, total=%u)\n", _dead_since_compact, total);
 			if (compact()) {
 				// After threshold-triggered compaction, seg0 holds the compacted data.
 				// Open seg1 for new writes, mirroring what rotate_segment_if_needed() does
@@ -1268,6 +1334,7 @@ USTORE_LOG("[ustore] Compaction triggered by deleted threshold\n");
 USTORE_LOG("[ustore] Removing file: %s\n", sname);
 			_filesystem.remove(sname);
 		}
+USTORE_LOG("[ustore] Moving temporary file to: %s\n", seg0);
 		if (!_filesystem.rename(tmp_path, seg0)) {
 			_filesystem.remove(tmp_path);
 			return;
@@ -1390,7 +1457,7 @@ USTORE_LOG("[ustore] Opening tmp file: %s\n", tmp_path);
 
 		// Apply policies before enumerating live records so that expired and excess
 		// records are excluded from the compaction output.
-		prune_index_to_max_recs_();
+		prune_index_to_max_recs();
 
 		using OffVec = std::vector<uint32_t, rebind_alloc<uint32_t>>;
 		rebind_alloc<uint32_t> off_alloc(_alloc);
@@ -1406,7 +1473,7 @@ USTORE_LOG("[ustore] Opening tmp file: %s\n", tmp_path);
 			offsets.clear();
 			for (auto& kv : _index) {
 				if (kv.second.segment != s) continue;
-				if (is_ttl_expired_(kv.second.timestamp, kv.second.ttl)) continue;
+				if (is_ttl_expired(kv.second.timestamp, kv.second.ttl)) continue;
 				offsets.push_back(kv.second.offset);
 			}
 			std::sort(offsets.begin(), offsets.end());
@@ -1419,23 +1486,23 @@ USTORE_LOG("[ustore] Opening src file: %s\n", src_name);
 				if (src) {
 					for (size_t i = 0; i < offsets.size(); i++) {
 						uint32_t off = offsets[i];
-USTORE_LOG("[ustore] Processing record: %u offset: %lu\n", (unsigned)i, (unsigned long)off);
+//USTORE_LOG("[ustore] Processing record: %u offset: %lu\n", (unsigned)i, (unsigned long)off);
 						src.seek((long)off, SeekModeSet);
 						RecordHeader hdr;
 						if (src.read(&hdr, sizeof(hdr)) != sizeof(hdr)) {
-USTORE_LOG("[ustore] WARNING: Failed to read record header\n");
+							USTORE_LOG("[ustore] WARNING: Failed to read record header\n");
 							continue;
 						}
 						if (hdr.magic != MAGIC_RECORD || hdr.key_len > USTORE_MAX_KEY_LEN || hdr.length > USTORE_MAX_VALUE_LEN) {
-USTORE_LOG("[ustore] WARNING: Record magic number incorrect\n");
+							USTORE_LOG("[ustore] WARNING: Record magic number incorrect\n");
 							continue;
 						}
 						if (src.read(key_buf, hdr.key_len) != hdr.key_len) {
-USTORE_LOG("[ustore] WARNING: Failed to read record key\n");
+							USTORE_LOG("[ustore] WARNING: Failed to read record key\n");
 							continue;
 						}
 						if (hdr.length > 0 && src.read(val_buf, hdr.length) != hdr.length) {
-USTORE_LOG("[ustore] WARNING: Failed to read record value\n");
+							USTORE_LOG("[ustore] WARNING: Failed to read record value\n");
 							continue;
 						}
 						RecordCommit c; c.magic = MAGIC_COMMIT;
@@ -1472,14 +1539,14 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		if (!write_ok) {
 			if (committed_segs == 0) {
 				// No source segments were deleted — safe to discard compact.tmp entirely.
-				USTORE_LOG("[ustore] Compact aborted: storage full, all segments preserved\n");
+				USTORE_LOG("[ustore] WARNING: Compact aborted: storage full, all segments preserved\n");
 				_filesystem.remove(tmp_path);
 				clear_journal();
 			} else {
 				// Some source segments were already deleted; compact.tmp holds their records.
 				// Leave compact.tmp and the journal in place. recover_if_needed() on the
 				// next boot will rename compact.tmp to segment 0 and recover cleanly.
-				USTORE_LOG("[ustore] Compact aborted mid-way after %u segments: recovery on next boot\n",
+				USTORE_LOG("[ustore] WARNING: Compact aborted mid-way after %u segments: recovery on next boot\n",
 				       committed_segs);
 			}
 			return false;

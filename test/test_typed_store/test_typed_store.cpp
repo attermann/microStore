@@ -363,6 +363,52 @@ void test_typed_store_vector_value() {
     TEST_ASSERT_EQUAL(0, memcmp(blob.data(), out.data(), blob.size()));
 }
 
+// TypedKeyStore<Key, Store> writes only keys; each record consumes 24 fixed bytes
+// (20-byte header + 4-byte commit) plus the key.  Exists/remove/iterate work
+// through the standard TypedStore surface.
+void test_typed_store_keyset() {
+    reset_ram_fs();
+
+    using StringStore = microStore::TypedKeyStore<std::string, microStore::FileStore>;
+
+    {
+        microStore::FileStore fs_store;
+        auto fs = make_ram_fs();
+        fs_store.init(fs, "/p");
+        StringStore writer(fs_store);
+        TEST_ASSERT_TRUE(writer.put("alpha", {}));
+
+        int seg = find_file("/p_seg0.dat");
+        TEST_ASSERT_TRUE(seg >= 0);
+        TEST_ASSERT_EQUAL(24u + 5u, g_files[seg].data.size());
+
+        TEST_ASSERT_TRUE(writer.put("beta",  {}));
+        TEST_ASSERT_TRUE(writer.put("gamma", {}));
+    }
+    remove_ram_file("/p_index.dat");
+
+    microStore::FileStore fs_store2;
+    auto fs2 = make_ram_fs();
+    fs_store2.init(fs2, "/p");
+    StringStore reader(fs_store2);
+
+    TEST_ASSERT_EQUAL(3u, reader.size());
+    TEST_ASSERT_TRUE (reader.exists("alpha"));
+    TEST_ASSERT_TRUE (reader.exists("beta"));
+    TEST_ASSERT_TRUE (reader.exists("gamma"));
+    TEST_ASSERT_FALSE(reader.exists("delta"));
+
+    TEST_ASSERT_TRUE(reader.remove("beta"));
+    TEST_ASSERT_FALSE(reader.exists("beta"));
+    TEST_ASSERT_EQUAL(2u, reader.size());
+
+    std::map<std::string, int> seen;
+    for (auto e : reader) seen[e.key]++;
+    TEST_ASSERT_EQUAL(2, (int)seen.size());
+    TEST_ASSERT_EQUAL(1, seen["alpha"]);
+    TEST_ASSERT_EQUAL(1, seen["gamma"]);
+}
+
 // TypedStore with a custom Codec<int32_t> stores and retrieves integer values.
 void test_typed_store_custom_int_codec() {
     reset_ram_fs();
@@ -408,6 +454,7 @@ int runUnityTests(void) {
     RUN_TEST(test_typed_store_size);
     RUN_TEST(test_typed_store_iterator);
     RUN_TEST(test_typed_store_vector_value);
+    RUN_TEST(test_typed_store_keyset);
     RUN_TEST(test_typed_store_custom_int_codec);
     return UNITY_END();
 }
