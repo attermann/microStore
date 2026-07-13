@@ -233,11 +233,13 @@ public:
 
 	inline void set_ttl_secs(uint32_t ttl_s)
 	{
+USTORE_LOG("[ustore] set_ttl_secs: %u\n", ttl_s);
 		policy_ttl_secs    = ttl_s;
 	}
 
 	inline void set_max_recs(uint32_t max_recs)
 	{
+USTORE_LOG("[ustore] set_max_recs: %u\n", max_recs);
 		policy_max_recs = max_recs;
 	}
 

@@ -619,11 +619,13 @@ USTORE_LOG("[ustore] exists: found key %s\n", bin_str(key, key_len));
 
 	inline void set_ttl_secs(uint32_t ttl_s)
 	{
+USTORE_LOG("[ustore] set_ttl_secs: %u\n", ttl_s);
 		policy_ttl_secs    = ttl_s;
 	}
 
 	inline void set_max_recs(uint32_t max_recs)
 	{
+USTORE_LOG("[ustore] set_max_recs: %u\n", max_recs);
 		policy_max_recs = max_recs;
 	}
 
@@ -1259,9 +1261,12 @@ USTORE_LOG("[ustore] rotate_segment_if_needed: closing active file\n");
 	void compact_if_threshold()
 	{
 #if USTORE_COMPACT_THRESHOLD > 0
-		uint32_t total = (uint32_t)_index.size() + _dead_since_compact;
-		if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
-USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, total=%u)\n", _dead_since_compact, total);
+		// CBA Using total records can lead to excessive compaction (ie, deleting `1 record when there are only two triggers)
+		// Only triggering relative to policy_max_recs instead
+		//uint32_t limit = (uint32_t)_index.size() + _dead_since_compact;
+		//if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
+		if (policy_max_recs > 0 && _dead_since_compact * 100 / policy_max_recs >= USTORE_COMPACT_THRESHOLD) {
+USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, max=%u)\n", _dead_since_compact, policy_max_recs);
 			if (compact()) {
 				// After threshold-triggered compaction, seg0 holds the compacted data.
 				// Open seg1 for new writes, mirroring what rotate_segment_if_needed() does
