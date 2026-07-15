@@ -71,7 +71,8 @@ namespace microStore { namespace Adapters {
 class FlashFSFileSystem : public microStore::FileSystem {
 
 public:
-	FlashFSFileSystem(const SPIFlash_Device_t* device, uint8_t ss = SS) : microStore::FileSystem(new FileSystemImpl(device, ss)) {}
+	FlashFSFileSystem(const SPIFlash_Device_t* device, uint8_t ss = SS, SPIClass *spiinterface = &SPI) : microStore::FileSystem(new FileSystemImpl(device, ss, spiinterface)) {}
+	FlashFSFileSystem(const SPIFlash_Device_t* device, uint8_t ss, SPIClass &spiinterface) : microStore::FileSystem(new FileSystemImpl(device, ss, spiinterface)) {}
     virtual ~FlashFSFileSystem() {}
 
     // Disable heap allocation
@@ -129,7 +130,8 @@ protected:
 	class FileSystemImpl : public microStore::FileSystemImpl {
 
 	public:
-		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss = SS) : _device(device), _transport(ss, SPI), _flash(&_transport) {}
+		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss = SS, SPIClass *spiinterface = &SPI) : _device(device), _transport(ss, spiinterface), _flash(&_transport) {}
+		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss, SPIClass &spiinterface) :FileSystemImpl(device, ss, &spiinterface) {}
 	    virtual ~FileSystemImpl() {}
 
 	public:
