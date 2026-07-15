@@ -55,3 +55,18 @@ The (currently) installed version is 1.10700.0 (maps to BSP v1.7.0). The relevan
 - libraries/Adafruit_LittleFS/src/Adafruit_LittleFS_File.h  (add seek(uint32_t, uint8_t) overload)
 - libraries/Adafruit_LittleFS/src/Adafruit_LittleFS_File.cpp (implement it via lfs_file_seek)
 The underlying lfs_file_seek already takes a whence parameter (LFS_SEEK_SET/CUR/END), so the implementation would be trivial. Worth filing — but your adapter fix is the right defensive solution either way.
+
+## Contributing
+
+Contributions to **microStore** are welcome and appreciated.
+
+Before opening an issue or submitting a pull request, please read the project's **[CONTRIBUTING.md](CONTRIBUTING.md)** guide. It describes the expectations for bug reports, feature requests, coding standards, testing, and pull requests.
+
+In particular, contributors are asked to:
+
+- Clearly identify the problem being solved before describing the proposed solution.
+- Keep pull requests focused on a **single logical concern**.
+- Test changes thoroughly, including on **all affected platforms** when modifying shared code.
+- Update documentation when introducing user-visible changes.
+
+Following these guidelines helps streamline reviews, improve software quality, and make it easier to integrate contributions.
