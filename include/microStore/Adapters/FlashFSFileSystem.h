@@ -25,8 +25,8 @@
 
 namespace microStore { namespace Adapters {
 
-// Flash definition structure for RAK15001
-// Settings for the Gigadevice GD25Q16C 2MiB SPI flash.
+// Flash definition structure for RAK15001 (Gigadevice GD25Q16C 2MiB SPI Flash)
+// Product: https://store.rakwireless.com/products/wisblock-flash-module-rak15001?srsltid=AfmBOoqY6GYYXDtHeLcOW4Fju11Mueo38IWUIQyS12rHjCCyE46m-8Cv
 // Datasheet: http://www.gigadevice.com/datasheet/gd25q16c/
 #define RAK15001							\
 {											\
@@ -35,19 +35,25 @@ namespace microStore { namespace Adapters {
 	.manufacturer_id = 0xc8,				\
 	.memory_type = 0x40,					\
 	.capacity = 0x15,						\
-	.max_clock_speed_mhz = 15,				\
+	/*.max_clock_speed_mhz = 104,*/				\
+	.max_clock_speed_mhz = 8,				\
+	/*.quad_enable_bit_mask = 0x02,*/			\
 	.quad_enable_bit_mask = 0x00,			\
 	.has_sector_protection = false,			\
 	.supports_fast_read = true,				\
+	/*.supports_qspi = true,*/					\
 	.supports_qspi = false,					\
+	/*.supports_qspi_writes = true,*/			\
 	.supports_qspi_writes = false,			\
 	.write_status_register_split = false,	\
-	.single_status_byte = true,				\
+	/*.single_status_byte = false,*/				\
+	.single_status_byte = false,				\
 	.is_fram = false,						\
 }
 
-// Flash definition structure for RAK15007
-// https://www.infineon.com/assets/row/public/documents/10/49/infineon-cy15b108qn-cy15v108qn-8mb-excelon-lp-ferroelectric-ram-f-ram-serial-spi-1024k-8-40-mhz-industrial-datasheet-en.pdf
+// Flash definition structure for RAK15007 (Infineon CY15B108QN 8Mb Ferroelectric RAM)
+// Product: https://store.rakwireless.com/products/1mbyte-fram-nvram-module-infinion-cy15x108qn?srsltid=AfmBOopQK4IyVrk5Hw-e6kLjhjvSvnuhyU5aMo8dWvTMruSW6J0hx7AK
+// Datasheet: https://www.infineon.com/assets/row/public/documents/10/49/infineon-cy15b108qn-cy15v108qn-8mb-excelon-lp-ferroelectric-ram-f-ram-serial-spi-1024k-8-40-mhz-industrial-datasheet-en.pdf
 // RDID has continuation code: 7F-C2-2E-00
 #define RAK15007							\
 {											\
@@ -56,17 +62,43 @@ namespace microStore { namespace Adapters {
 	.manufacturer_id = 0x7F,				\
 	.memory_type = 0x2e,					\
 	.capacity = 0x05,						\
-	.max_clock_speed_mhz = 40,				\
+	/*.max_clock_speed_mhz = 40,*/				\
+	.max_clock_speed_mhz = 8,				\
 	.quad_enable_bit_mask = 0x00,			\
 	.has_sector_protection = false,			\
 	.supports_fast_read = true,				\
 	.supports_qspi = false,					\
-	.supports_qspi_writes = true,			\
+	/*.supports_qspi_writes = true,*/			\
+	.supports_qspi_writes = false,			\
 	.write_status_register_split = false,	\
 	.single_status_byte = true,				\
 	.is_fram = true,						\
 }
 
+// Flash definition structure for W25Q128 (Winbond W25Q128JV-SQ 128 MBit QSPI Flash)
+// Product: https://www.adafruit.com/product/5634?srsltid=AfmBOor53vIXu4dYSC5A1rFhwpdYTMFpH1u_qlB9fKMd6_UNQWnFldpf
+// Datasheet: https://www.winbond.com/resource-files/w25q128jv%20revf%2003272018%20plus.pdf
+#define W25Q128								\
+{											\
+	.total_size = (1UL << 24),				\
+	.start_up_time_us = 5000,				\
+	.manufacturer_id = 0xef,				\
+	.memory_type = 0x40,					\
+	.capacity = 0x18,						\
+	/*.max_clock_speed_mhz = 133,*/				\
+	.max_clock_speed_mhz = 8,				\
+	/*.quad_enable_bit_mask = 0x02,*/			\
+	.quad_enable_bit_mask = 0x00,			\
+	.has_sector_protection = false,			\
+	.supports_fast_read = true,				\
+	/*.supports_qspi = true,*/					\
+	.supports_qspi = false,					\
+	/*.supports_qspi_writes = true,*/			\
+	.supports_qspi_writes = false,			\
+	.write_status_register_split = false,	\
+	.single_status_byte = false,			\
+	.is_fram = false,						\
+}
 
 class FlashFSFileSystem : public microStore::FileSystem {
 
@@ -132,7 +164,17 @@ protected:
 	public:
 		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss = SS, SPIClass *spiinterface = &SPI) : _device(device), _transport(ss, spiinterface), _flash(&_transport) {}
 		FileSystemImpl(const SPIFlash_Device_t* device, uint8_t ss, SPIClass &spiinterface) :FileSystemImpl(device, ss, &spiinterface) {}
-	    virtual ~FileSystemImpl() {}
+	    virtual ~FileSystemImpl() {
+			if (_mounted) {
+				// We own the current FlashFS mount — tear it down before our
+				// _flash object goes out of scope, otherwise FlashFS keeps a
+				// dangling context pointer into freed memory.
+				USTORE_LOG("[ustore] Unmounting FlashFSFileSystem\n");
+				FlashFS.end();       // lfs_unmount + clears _mounted on the global
+				_flash.end();        // frees Adafruit_FlashCache heap allocation
+				_mounted = false;
+			}
+		}
 
 	public:
 
@@ -153,13 +195,14 @@ protected:
 				return false;
 			}
 			if (!_flash.begin(_device)) {
-				USTORE_LOG("[ustore] ERROR: Failed to initialize device for FlashFSFileSystem!\n");
+				USTORE_LOG("[ustore] WARNING: Failed to initialize device for FlashFSFileSystem!\n");
 				return false;
 			}
 			if (!FlashFS.begin(&_flash)) {
-				USTORE_LOG("[ustore] ERROR: Failed to initialize FlashFSFileSystem!\n");
+				USTORE_LOG("[ustore] WARNING: Failed to initialize FlashFSFileSystem!\n");
 				return false;
 			}
+			_mounted = true;	// <-- this instance now owns the global FlashFS binding
 			if (reformatOnFail) {
 				// Ensure filesystem is writable and reformat if not
 				bool verified = false;
@@ -301,6 +344,7 @@ protected:
 		const SPIFlash_Device_t* _device = nullptr;
 		Adafruit_FlashTransport_SPI _transport;
 		Cached_SPIFlash _flash;
+		bool _mounted = false;
 	};
 
 };
