@@ -1,3 +1,5 @@
+
+
 # microStore
 
 Advanced header-only KV store for embedded filesystems that follows the log-structured KV architecture used by systems such as Bitcask, which combines an append-only log with an in-memory index for fast lookups.
@@ -28,7 +30,7 @@ Advanced header-only KV store for embedded filesystems that follows the log-stru
 
 There is a bug in older versions of `esp_littlefs` that manifests as a crash on ESP32 builds using the default `espressif32` platofrm.
 A fix is present in more recent versions of the ESP-IDF (5.x), but that version does not (yet) ship with PlatformIO.
-Since ESP-IF is provided as a binary for linking, there is no known clean option for overriding the `esp_littlefs` with a patched version.
+Since ESP-IDF is provided as a binary for linking, there is no known clean option for overriding the `esp_littlefs` with a patched version.
 The current workaround for this issue is to use the `pioarduino` fork for Arduino Core 3.x / ESP-IDF 5.x support which contains this fix. This can be enable with the following platform definition in `platformio.ini`:
 
 ```
