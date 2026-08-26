@@ -1433,6 +1433,11 @@ public:
 	bool compact()
 	{
 USTORE_LOG("[ustore] Compacting storage...\n");
+		// The active segment is one of the sources removed below. LittleFS
+		// and FatFS refuse to unlink a file that is still open (POSIX would
+		// allow it), so close it first. Both exit paths reopen a segment so
+		// the store stays writable for callers that invoke compact() directly.
+		if (active_file) active_file.close();
 
 		// --- Phase 1: write COMPACTING journal (next_seg=0: no source segments deleted yet) ---
 		write_journal(JOURNAL_COMPACTING, 0, 0);
@@ -1542,6 +1547,7 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		outf.close();
 
 		if (!write_ok) {
+			open_segment(current_segment);   // keep the store writable after a failed compaction
 			if (committed_segs == 0) {
 				// No source segments were deleted — safe to discard compact.tmp entirely.
 				USTORE_LOG("[ustore] WARNING: Compact aborted: storage full, all segments preserved\n");
@@ -1561,6 +1567,7 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		write_journal(JOURNAL_COMMIT);
 
 		finalize_compaction();   // rename + index rebuild
+		open_segment(current_segment);   // seg0 = compacted data; internal callers move on to seg1
 
 		clear_journal();
 
