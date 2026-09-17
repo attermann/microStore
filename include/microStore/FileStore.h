@@ -1267,11 +1267,21 @@ USTORE_LOG("[ustore] rotate_segment_if_needed: closing active file\n");
 		//if (total > 0 && _dead_since_compact * 100 / total >= USTORE_COMPACT_THRESHOLD) {
 		if (policy_max_recs > 0 && _dead_since_compact * 100 / policy_max_recs >= USTORE_COMPACT_THRESHOLD) {
 USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, max=%u)\n", _dead_since_compact, policy_max_recs);
+			// The active segment must be closed before compact() deletes it, as
+			// rotate_segment_if_needed() already does. ESP-IDF LittleFS refuses to
+			// unlink an open file ("Failed to unlink ... Has open FD"), which left
+			// the active segment in place after every threshold compaction.
+			flush_buffer();
+			if (active_file) active_file.close();
 			if (compact()) {
 				// After threshold-triggered compaction, seg0 holds the compacted data.
 				// Open seg1 for new writes, mirroring what rotate_segment_if_needed() does
 				// after a rotation-triggered compaction.
 				current_segment = 1;
+				open_segment(current_segment);
+			} else {
+				// Compaction failed or was skipped; resume appending to the segment
+				// that was active before.
 				open_segment(current_segment);
 			}
 		}
