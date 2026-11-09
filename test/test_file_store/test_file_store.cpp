@@ -637,7 +637,7 @@ void test_file_store_ttl_exists_expires() {
 void test_file_store_compact_basic() {
     reset_ram_fs();
 
-    uint32_t now = microStore::time();
+    uint32_t now = microStore::time() - 2;  // past: init() sweeps future-dated records
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
@@ -717,7 +717,7 @@ void test_legacy_prefix_unchanged() {
 void test_dir_prefix_reload_index() {
     reset_ram_fs();
 
-    uint32_t now = microStore::time();
+    uint32_t now = microStore::time() - 2;  // past: init() sweeps future-dated records
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
@@ -742,7 +742,7 @@ void test_dir_prefix_reload_index() {
 void test_dir_prefix_compact() {
     reset_ram_fs();
 
-    uint32_t now = microStore::time();
+    uint32_t now = microStore::time() - 2;  // past: init() sweeps future-dated records
     {
         microStore::FileStore writer;
         auto fs = make_ram_fs();
