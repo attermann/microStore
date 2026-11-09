@@ -40,6 +40,7 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 |------|---------|
 | `include/microStore/FileStore.h` | KV store engine — the main library logic |
 | `include/microStore/HeapStore.h` | In-memory KV store with TTL/eviction; same API shape as `FileStore` |
+| `include/microStore/AnyStore.h` | Type-erased runtime wrapper over any store (`FileStore`, `HeapStore`, custom) |
 | `include/microStore/TypedStore.h` | Typed wrapper over any store (`FileStore` or `HeapStore`) |
 | `include/microStore/Codec.h` | Encode/decode specializations for `TypedStore` keys and values |
 | `include/microStore/FileSystem.h` | OOP filesystem abstraction (`FileSystem` / `FileSystemImpl`) |
@@ -75,13 +76,13 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 | `USTORE_MAX_VALUE_LEN` | 1024 | Max value size in bytes |
 | `USTORE_DEFAULT_SEGMENT_SIZE` | 65536 | Per-segment file size limit |
 | `USTORE_DEFAULT_SEGMENT_COUNT` | 8 | Max number of segments |
-| `USTORE_WRITE_BUFFER_SIZE` | 4096 | Write buffer size |
+| `USTORE_WRITE_BUFFER_SIZE` | 512 | Write buffer size |
 | `USTORE_MAX_KEY_LEN` | 64 | Max key length in bytes |
 | `USTORE_COMPACT_RETRY_MS` | 60000 | Compaction cooldown (ms) |
 
 ### Store Variants
 
-Three store types share a common API shape and are interchangeable as the backing store for `TypedStore`:
+Three store types share a common API shape and are interchangeable as the backing store for `TypedStore`. `AnyStore` wraps any of them behind one runtime-selected type:
 
 **`microStore::FileStore`** (`FileStore.h`) — persistent, crash-safe, append-only log store.
 - `init(FileSystem fs, const char* prefix)` — initialize with a `FileSystem` and file name prefix
@@ -106,3 +107,11 @@ Three store types share a common API shape and are interchangeable as the backin
 - Built-in codecs: `std::string`, `std::vector<uint8_t>`, `char*`
 - Custom types require a `Codec<T>` specialization with `encode(T) → vector<uint8_t>` and `decode(vector<uint8_t>, T&) → bool`
 - Range-based for loop yields `TypedStore::Entry{key, value}`
+
+**`microStore::AnyStore`** (`AnyStore.h`) — type-erased, copyable, owning handle (`shared_ptr`, like `FileSystem`) to any store with the common API; the backend is chosen at runtime.
+- `AnyStore::make<S>(args...)` / `AnyStore::allocate<S>(alloc, args...)` construct in place; `AnyStore(std::shared_ptr<S>)` adopts an existing store
+- `target<S>()` returns the concrete store (or `nullptr`) without RTTI; use it for `init()` and other store-specific calls
+- Empty (default/`reset()`) store: `isValid()` false, all ops return false/0/no-op, `begin() == end()`
+- Iterator: `->` gives metadata only, `*` loads the value (mirrors FileStore lazy loading); `end()` is a null sentinel
+- Policy setters forward to the current backend only (not cached across reassignment)
+- Works as the `Store` parameter of `TypedStore` / `TypedKeyStore`; C++11-compatible

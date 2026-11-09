@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `AnyStore`, a type-erased wrapper that selects any store backend (`FileStore`, `HeapStore`, or custom) at runtime and works with `TypedStore`.
+
 ## [0.1.7] - 2026-06-27
 
 ### Added

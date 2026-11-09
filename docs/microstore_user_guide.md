@@ -111,7 +111,7 @@ Two policies are available on every Store; both reduce flash churn by keeping th
 
 ## 3. Store Variants
 
-The library ships three Stores that share the same API shape and can be composed.
+The library ships three Stores that share the same API shape and can be composed, plus `AnyStore`, which wraps any of them behind one runtime-selected type.
 
 ### 3.1 `microStore::FileStore`
 
@@ -147,6 +147,26 @@ class TypedStore;
 It encodes and decodes keys and values via `Codec<T>` specializations, then forwards to the underlying store. Built-in codecs are provided for `std::string`, `std::vector<uint8_t>`, and `char*`. For custom types, specialise `Codec<T>` with `encode(T) → std::vector<uint8_t>` and `decode(const std::vector<uint8_t>&, T&) → bool`.
 
 Use it when you want type-safe `put(key, value)` / `get(key, value)` calls and forget about byte buffers at the call site.
+
+### 3.4 `microStore::AnyStore`
+
+`include/microStore/AnyStore.h`. A type-erased handle that can hold *any* store with the common API (`FileStore`, `HeapStore`, or your own), chosen at runtime. It owns the store through a `shared_ptr`, so copies share one backend, just like `FileSystem`. Only the backend you pick is allocated.
+
+```cpp
+AnyStore store = use_fs ? AnyStore::make<FileStore>() : AnyStore::make<HeapStore>();
+store.set_max_recs(100);                     // before FileStore::init() so boot pruning applies
+if (FileStore* f = store.target<FileStore>()) f->init(fs, "/path/");
+else if (HeapStore* h = store.target<HeapStore>()) h->init();
+```
+
+- `AnyStore::make<S>(args...)` builds `S` in place (one allocation). `AnyStore::allocate<S>(alloc, args...)` does the same with a custom allocator. `AnyStore(std::shared_ptr<S>)` adopts a store you've already configured.
+- `target<S>()` returns the concrete store, or `nullptr` if the backend isn't an `S`. It needs no RTTI. Use it for `init()` and other store-specific calls such as `compact()`.
+- A default-constructed or `reset()` store is empty. `isValid()` is false, every operation returns false, 0 or does nothing, and `begin() == end()`.
+- Iteration matches `FileStore`: `it->` gives metadata only and `*it` loads the value.
+- Policy setters forward to the current backend. They are not remembered when you assign a new backend.
+- It works as the `Store` parameter of `TypedStore` and `TypedKeyStore`.
+
+Use it when the choice between persistent and volatile storage depends on runtime conditions, such as whether a filesystem is mounted or how the application is configured. See §6.10 for a full example.
 
 ---
 
@@ -457,7 +477,64 @@ int32_t n = 0;
 counters.get("boot_count", n);
 ```
 
-### 6.10 A complete walk-through
+### 6.10 Choosing a store at runtime with AnyStore
+
+A class can keep a private `AnyStore` and decide in a `start()` method whether it should persist. A `TypedStore` member can wrap the `AnyStore` itself. It keeps a reference to the handle, so it stays valid when the backend is swapped.
+
+```cpp
+#include <microStore/AnyStore.h>
+#include <microStore/FileStore.h>
+#include <microStore/HeapStore.h>
+#include <microStore/TypedStore.h>
+
+class PathTable {
+public:
+    PathTable() : _typed(_store) {}
+
+    // fs == nullptr means no filesystem is mounted.
+    bool start(microStore::FileSystem* fs, bool transport_enabled) {
+        using namespace microStore;
+        if (transport_enabled && fs != nullptr) {
+            // Adopt: configure and init the concrete store first, then hand it over.
+            std::shared_ptr<FileStore> file = std::make_shared<FileStore>();
+            file->set_max_recs(256);                 // before init() so boot-time pruning applies
+            if (!file->init(*fs, "/paths/")) return false;
+            _store = AnyStore(file);
+        } else {
+            // Factory: single allocation, configure through the handle.
+            _store = AnyStore::make<HeapStore>();
+            _store.set_max_recs(64);
+            _store.set_ttl_secs(3600);
+            _store.target<HeapStore>()->init();
+        }
+        return _store.isValid();
+    }
+
+    void stop() {
+        _store.close();
+        _store.reset();                              // frees the backend; RAM released
+    }
+
+    bool add(const std::string& dest, const std::string& path) { return _typed.put(dest, path); }
+    bool lookup(const std::string& dest, std::string& path)    { return _typed.get(dest, path); }
+    bool forget(const std::string& dest)                       { return _typed.remove(dest); }
+    size_t count() const                                       { return _typed.size(); }
+    bool persistent() const { return _store.target<microStore::FileStore>() != nullptr; }
+
+    void dump() {
+        for (auto& e : _typed)
+            printf("%s -> %s\n", e.key.c_str(), e.value.c_str());
+    }
+
+private:
+    microStore::AnyStore _store;   // must be declared before _typed (initialization order)
+    microStore::TypedStore<std::string, std::string, microStore::AnyStore> _typed;
+};
+```
+
+Before `start()` and after `stop()`, every call is safe: `add`, `lookup` and `forget` return false, `count()` returns 0, and `dump()` prints nothing. Restarting in File mode reloads the persisted records. Restarting in Heap mode starts empty.
+
+### 6.11 A complete walk-through
 
 ```cpp
 #include <microStore/FileStore.h>
