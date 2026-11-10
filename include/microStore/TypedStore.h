@@ -93,16 +93,24 @@ public:
     {
     public:
 
+        // Decoding is deferred to operator*, so advancing costs nothing.
+        //
+        // The store underneath is lazy on purpose: BasicFileStore reads a
+        // record only when it is dereferenced, and its operator-> is
+        // documented as metadata-only for exactly that reason. Loading in the
+        // constructor and in operator++ took that back — every step read the
+        // record off the filesystem whether the caller wanted it or not, so a
+        // traversal paid for entries it never looked at and reaching position
+        // N always cost N reads.
         iterator(typename Store::iterator it, typename Store::iterator end)
-            : it_(std::move(it)), end_(std::move(end))
+            : it_(std::move(it)), end_(std::move(end)), loaded_(false)
         {
-            if (it_ != end_) load();
         }
 
         iterator& operator++()
         {
             ++it_;
-            if (it_ != end_) load();
+            loaded_ = false;
             return *this;
         }
 
@@ -113,6 +121,7 @@ public:
 
         Entry& operator*()
         {
+            if (!loaded_) load();
             return current_;
         }
 
@@ -121,10 +130,16 @@ public:
         typename Store::iterator it_;
         typename Store::iterator end_;
         Entry current_;
+        bool loaded_;
 
         void load()
         {
-            const auto& raw = *it_;  // operator* triggers lazy value load
+            loaded_ = true;
+            // The end iterator is not dereferenceable. The constructor used to
+            // say so by not loading; the guard moves here now that the load
+            // happens on demand.
+            if (it_ == end_) return;
+            const auto& raw = *it_;  // operator* triggers the store's lazy value load
             KeyCodec::decode(raw.key, current_.key);
             ValueCodec::decode(raw.value, current_.value);
         }

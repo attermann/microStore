@@ -123,9 +123,14 @@ protected:
     virtual bool isValid() const override { return !_closed; }
 };
 
+// Counts opens so a test can assert what a traversal actually reads, rather
+// than assert that it is fast and hope.
+static int g_opens = 0;
+
 class RamFileSystemImpl : public microStore::FileSystemImpl {
 protected:
     virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+        g_opens++;
         bool wr = (mode == microStore::File::ModeWrite || mode == microStore::File::ModeReadWrite);
         bool ap = (mode == microStore::File::ModeAppend || mode == microStore::File::ModeReadAppend);
         int idx = find_file(path);
@@ -173,6 +178,7 @@ protected:
 static void reset_ram_fs() {
     for (int i = 0; i < g_nfiles; i++) { g_files[i].data.clear(); g_files[i].pos = 0; g_files[i].open = false; }
     g_nfiles = 0;
+    g_opens = 0;
 }
 static microStore::FileSystem make_ram_fs() { return microStore::FileSystem{new RamFileSystemImpl()}; }
 
@@ -336,6 +342,56 @@ void test_typed_store_iterator() {
 }
 
 // TypedStore<string, vector<uint8_t>> round-trips raw binary values.
+void test_typed_store_iterator_advance_reads_nothing() {
+    reset_ram_fs();
+
+    {
+        microStore::FileStore fs_store;
+        auto fs = make_ram_fs();
+        fs_store.init(fs, "/lazy");
+        StringStore writer(fs_store);
+        for (int n = 0; n < 8; n++) {
+            writer.put(std::string("k") + (char)('0' + n), std::string("v") + (char)('0' + n));
+        }
+    }
+    remove_ram_file("/lazy_index.dat");
+
+    microStore::FileStore fs_store2;
+    auto fs2 = make_ram_fs();
+    fs_store2.init(fs2, "/lazy");
+    StringStore reader(fs_store2);
+
+    // Walking without dereferencing must not touch the filesystem: the store
+    // underneath reads a record only on operator*, and the typed wrapper is
+    // not allowed to undo that. Without this, a caller that skips entries —
+    // or merely counts them — pays a read for every one.
+    g_opens = 0;
+    int stepped = 0;
+    for (auto it = reader.begin(); it != reader.end(); ++it) stepped++;
+    TEST_ASSERT_EQUAL(8, stepped);
+    TEST_ASSERT_EQUAL(0, g_opens);
+
+    // ...and the values are still there for a caller that does ask.
+    g_opens = 0;
+    int read = 0;
+    for (auto it = reader.begin(); it != reader.end(); ++it) {
+        auto& e = *it;
+        TEST_ASSERT_EQUAL(2, (int)e.key.size());
+        TEST_ASSERT_EQUAL(2, (int)e.value.size());
+        read++;
+    }
+    TEST_ASSERT_EQUAL(8, read);
+    TEST_ASSERT_TRUE(g_opens > 0);
+
+    // Dereferencing twice at one position reads once.
+    auto it = reader.begin();
+    g_opens = 0;
+    (void)*it;
+    const int first = g_opens;
+    (void)*it;
+    TEST_ASSERT_EQUAL(first, g_opens);
+}
+
 void test_typed_store_vector_value() {
     reset_ram_fs();
 
@@ -453,6 +509,7 @@ int runUnityTests(void) {
     RUN_TEST(test_typed_store_exists);
     RUN_TEST(test_typed_store_size);
     RUN_TEST(test_typed_store_iterator);
+    RUN_TEST(test_typed_store_iterator_advance_reads_nothing);
     RUN_TEST(test_typed_store_vector_value);
     RUN_TEST(test_typed_store_keyset);
     RUN_TEST(test_typed_store_custom_int_codec);
