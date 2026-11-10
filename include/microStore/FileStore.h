@@ -784,6 +784,10 @@ public:
 	// and cached until operator++ advances to the next record.
 	// WARNING: Mutating the store during iteration (put/remove/clear/compact) is
 	// undefined behaviour — unordered_map iterator invalidation rules apply.
+	// An iterator also holds its current segment file open until it is destroyed.
+	// Let iterators go out of scope before any put/remove/clear/compact: some
+	// backends (e.g. FAT with file locking) refuse to remove or rename a file
+	// that is still open, and each held handle consumes a filesystem file slot.
 	class iterator {
 	public:
 		using iterator_category = std::forward_iterator_tag;
@@ -844,26 +848,15 @@ public:
 		// Read the value from disk into current_.value. Called lazily by
 		// operator* / operator->. Marked const so it can mutate mutable members.
 		//
-		// The segment file is held open across the walk rather than reopened
-		// per record. Opening is not the cheap half: on LittleFS every open
-		// resolves the path afresh, and resolving a component replays that
-		// directory's metadata log, which grows with write activity until it
-		// is compacted. A store that is appended to constantly therefore
-		// charges more and more for each open while the read itself stays the
-		// same size. Measured on a 200-record path store on an ESP32-S3, one
-		// record cost 93-162 ms, nearly all of it under lfs_dir_find — the
-		// caller walking the table spent 32 s doing so and its task watchdog
-		// fired.
-		//
-		// Held for exactly the iteration's lifetime, which is all this claims:
-		// begin() flushes pending writes before iterating, so what is on disk
-		// is current, and mutating the store already invalidates the iterator.
-		// Every record is addressed by an explicit seek, so a handle shared
-		// with a copied iterator cannot be left on a stale position. It is not
-		// closed here on purpose — File holds a shared_ptr and FileImpl closes
-		// on destruction, so the last copy to go away closes it exactly once;
-		// closing it explicitly would shut the file under a copy (the one
-		// operator++(int) returns) that may still be walking.
+		// The segment file is held open across the walk and reopened only when
+		// the next record lives in a different segment, because open() is the
+		// expensive part on some backends (on LittleFS it replays directory
+		// metadata, a cost that grows with write activity). Note the walk follows
+		// index (hash) order, so a store spread across many segments still swaps
+		// handles often. Every read starts with an explicit seek, so copies of
+		// this iterator (e.g. from operator++(int)) can safely share the handle.
+		// It is deliberately not closed here: File is shared_ptr-backed, so the
+		// last copy to be destroyed closes it.
 		void load_value() const {
 			if (!seg_file_ || seg_held_ != iv_.segment) {
 				char name[USTORE_MAX_FILENAME_LEN];

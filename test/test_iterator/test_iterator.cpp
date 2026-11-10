@@ -25,6 +25,7 @@ struct RamFile {
 static RamFile g_files[16];
 static char    g_names[16][64];
 static int     g_nfiles = 0;
+static int     g_read_opens = 0;   // read-only open() calls, to check handle reuse
 
 static int find_file(const char* name) {
     for (int i = 0; i < g_nfiles; i++)
@@ -150,6 +151,7 @@ protected:
             g_files[idx].pos = g_files[idx].data.size();
         } else {
             if (idx < 0) return {};
+            g_read_opens++;
             g_files[idx].pos = 0;
             g_files[idx].open = true;
             g_files[idx].write_mode = false;
@@ -207,6 +209,14 @@ static void reset_ram_fs() {
         g_files[i].open = false;
     }
     g_nfiles = 0;
+    g_read_opens = 0;
+}
+
+static int count_segment_files() {
+    int n = 0;
+    for (int i = 0; i < g_nfiles; i++)
+        if (strstr(g_names[i], "seg") != nullptr) n++;
+    return n;
 }
 
 static microStore::FileSystem make_ram_fs() {
@@ -506,6 +516,112 @@ void test_iterator_value_loaded_on_deref() {
     TEST_ASSERT_EQUAL(0, memcmp(e2.value.data(), "hello", 5));
 }
 
+/* ---- Segment handle reuse tests ---- */
+
+void test_iterator_reuses_segment_handle() {
+    // A full walk over a single-segment store must open the segment for
+    // reading once, not once per record.
+    reset_ram_fs();
+    microStore::FileStore store;
+    auto fs = make_ram_fs();
+    store.init(fs, "/test");
+
+    char key[8], val[16];
+    for (int i = 0; i < 20; i++) {
+        snprintf(key, sizeof(key), "k%02d", i);
+        snprintf(val, sizeof(val), "value-%02d", i);
+        store.put(key, val);
+    }
+    TEST_ASSERT_EQUAL(1, count_segment_files());
+
+    int count = 0;
+    {
+        auto it = store.begin();   // flushes pending writes before we count opens
+        int opens_before = g_read_opens;
+        for (; it != store.end(); ++it) {
+            const auto& e = *it;
+            std::string k(e.key.begin(), e.key.end());
+            std::string v(e.value.begin(), e.value.end());
+            TEST_ASSERT_EQUAL_STRING(("value-" + k.substr(1)).c_str(), v.c_str());
+            count++;
+        }
+        TEST_ASSERT_EQUAL(1, g_read_opens - opens_before);
+    }
+    TEST_ASSERT_EQUAL(20, count);
+}
+
+void test_iterator_values_across_segments() {
+    // With small segments the records span several segment files; the walk
+    // must swap handles as needed and still return every value correctly.
+    reset_ram_fs();
+    microStore::FileStore store(/*segment_size=*/256, /*segment_count=*/8);
+    auto fs = make_ram_fs();
+    TEST_ASSERT_TRUE(store.init(fs, "/test"));
+
+    const int N = 24;
+    char key[8], val[24];
+    for (int i = 0; i < N; i++) {
+        snprintf(key, sizeof(key), "k%02d", i);
+        snprintf(val, sizeof(val), "segment-value-%02d", i);
+        TEST_ASSERT_TRUE(store.put(key, val));
+    }
+    TEST_ASSERT_TRUE(count_segment_files() > 1);
+
+    std::map<std::string, std::string> seen;
+    for (auto& e : store) {
+        std::string k(e.key.begin(), e.key.end());
+        std::string v(e.value.begin(), e.value.end());
+        seen[k] = v;
+    }
+
+    TEST_ASSERT_EQUAL(N, (int)seen.size());
+    for (int i = 0; i < N; i++) {
+        snprintf(key, sizeof(key), "k%02d", i);
+        snprintf(val, sizeof(val), "segment-value-%02d", i);
+        TEST_ASSERT_EQUAL_STRING(val, seen[key].c_str());
+    }
+}
+
+void test_iterator_post_increment_shares_handle() {
+    // operator++(int) returns a copy that shares the open segment handle with
+    // the advanced iterator. Dereferencing both, in either order, must yield
+    // each one's own value (every read seeks explicitly).
+    reset_ram_fs();
+    microStore::FileStore store(/*segment_size=*/256, /*segment_count=*/8);
+    auto fs = make_ram_fs();
+    TEST_ASSERT_TRUE(store.init(fs, "/test"));
+
+    const int N = 16;
+    char key[8], val[24];
+    for (int i = 0; i < N; i++) {
+        snprintf(key, sizeof(key), "k%02d", i);
+        snprintf(val, sizeof(val), "post-value-%02d", i);
+        TEST_ASSERT_TRUE(store.put(key, val));
+    }
+
+    auto expect = [](const microStore::FileStore::Entry& e) {
+        std::string k(e.key.begin(), e.key.end());
+        return "post-value-" + k.substr(1);
+    };
+
+    int count = 0;
+    auto it = store.begin();
+    *it;   // open a handle before copying, so the copy shares it
+    while (it != store.end()) {
+        auto prev = it++;
+        if (it != store.end()) {
+            const auto& cur = *it;            // read the advanced one first
+            TEST_ASSERT_EQUAL_STRING(expect(cur).c_str(),
+                std::string(cur.value.begin(), cur.value.end()).c_str());
+        }
+        const auto& old = *prev;              // then the copy
+        TEST_ASSERT_EQUAL_STRING(expect(old).c_str(),
+            std::string(old.value.begin(), old.value.end()).c_str());
+        count++;
+    }
+    TEST_ASSERT_EQUAL(N, count);
+}
+
 /* ---- Main ---- */
 
 int runUnityTests(void) {
@@ -522,6 +638,9 @@ int runUnityTests(void) {
     RUN_TEST(test_index_rebuild_persists_index);
     RUN_TEST(test_iterator_value_not_loaded_until_deref);
     RUN_TEST(test_iterator_value_loaded_on_deref);
+    RUN_TEST(test_iterator_reuses_segment_handle);
+    RUN_TEST(test_iterator_values_across_segments);
+    RUN_TEST(test_iterator_post_increment_shares_handle);
     return UNITY_END();
 }
 
