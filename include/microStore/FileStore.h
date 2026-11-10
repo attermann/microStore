@@ -843,13 +843,37 @@ public:
 
 		// Read the value from disk into current_.value. Called lazily by
 		// operator* / operator->. Marked const so it can mutate mutable members.
+		//
+		// The segment file is held open across the walk rather than reopened
+		// per record. Opening is not the cheap half: on LittleFS every open
+		// resolves the path afresh, and resolving a component replays that
+		// directory's metadata log, which grows with write activity until it
+		// is compacted. A store that is appended to constantly therefore
+		// charges more and more for each open while the read itself stays the
+		// same size. Measured on a 200-record path store on an ESP32-S3, one
+		// record cost 93-162 ms, nearly all of it under lfs_dir_find — the
+		// caller walking the table spent 32 s doing so and its task watchdog
+		// fired.
+		//
+		// Held for exactly the iteration's lifetime, which is all this claims:
+		// begin() flushes pending writes before iterating, so what is on disk
+		// is current, and mutating the store already invalidates the iterator.
+		// Every record is addressed by an explicit seek, so a handle shared
+		// with a copied iterator cannot be left on a stale position. It is not
+		// closed here on purpose — File holds a shared_ptr and FileImpl closes
+		// on destruction, so the last copy to go away closes it exactly once;
+		// closing it explicitly would shut the file under a copy (the one
+		// operator++(int) returns) that may still be walking.
 		void load_value() const {
-			char name[USTORE_MAX_FILENAME_LEN];
-			store_->segment_name(iv_.segment, name);
-
-			File f = store_->_filesystem.open(name, File::ModeRead);
+			if (!seg_file_ || seg_held_ != iv_.segment) {
+				char name[USTORE_MAX_FILENAME_LEN];
+				store_->segment_name(iv_.segment, name);
+				seg_file_ = store_->_filesystem.open(name, File::ModeRead);
+				seg_held_ = iv_.segment;
+			}
 			value_loaded_ = true;
-			if (!f) { current_.value.clear(); return; }
+			if (!seg_file_) { current_.value.clear(); return; }
+			File& f = seg_file_;
 
 			f.seek((long)iv_.offset, SeekModeSet);
 			RecordHeader hdr;
@@ -858,7 +882,6 @@ public:
 			current_.value.resize(hdr.length);
 			if (hdr.length > 0)
 				f.read(current_.value.data(), hdr.length);
-			f.close();
 		}
 
 		BasicFileStore*      store_;
@@ -867,6 +890,11 @@ public:
 		IndexValue           iv_;
 		mutable bool         value_loaded_;
 		mutable Entry        current_;
+		// The segment this iterator currently holds open, and which one it is.
+		// A store spans several segments, so a walk that crosses a boundary
+		// swaps the handle rather than keeping one per segment open.
+		mutable File         seg_file_;
+		mutable uint32_t     seg_held_ = 0;
 	};
 
 	/* -------- BEGIN / END -------- */
