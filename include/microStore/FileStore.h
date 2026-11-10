@@ -1382,6 +1382,14 @@ USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, max=%u)
 	// Only called with a COMMIT journal on flash. Returns false if the swap could
 	// not be completed; compact.tmp then holds the only copy of the data, so the
 	// caller must keep the journal and the next boot retries.
+	//
+	// Known limitation: if the rename fails in a running store (a filesystem
+	// error, not a power loss), every segment has already been removed, so until
+	// the next reboot reads of existing keys fail, and records written in the
+	// meantime go to a fresh segment that boot recovery then deletes when it
+	// completes the swap. The pre-compaction data itself is preserved. Refusing
+	// writes until reboot would close this gap but is a behaviour change that
+	// was deliberately left out. See docs/incremental_compaction.md.
 	bool finalize_compaction()
 	{
 		char tmp_path[USTORE_MAX_FILENAME_LEN]; tmp_name(tmp_path);
@@ -1667,7 +1675,9 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 					clear_journal();
 				} else {
 					// Keep compact.tmp and the journal; compact() refuses to run until
-					// recover_if_needed() completes this on the next boot.
+					// recover_if_needed() completes this on the next boot. Until then,
+					// reads of keys that lived in the deleted segments fail. New writes
+					// go to the active segment, which recovery keeps, so none are lost.
 					USTORE_LOG("[ustore] ERROR: Mid-way recovery failed: deferred to next boot\n");
 				}
 			}
@@ -1678,7 +1688,9 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		write_journal(JOURNAL_COMMIT);
 
 		if (!finalize_compaction())   // rename + index rebuild
-			return false;             // keep COMMIT journal; next boot retries
+			return false;             // keep COMMIT journal; next boot retries.
+			                          // Writes made before that reboot are lost:
+			                          // see the limitation on finalize_compaction().
 
 		clear_journal();
 

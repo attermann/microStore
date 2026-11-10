@@ -94,14 +94,25 @@ Phase 4  compact.tmp.close()
            if committed_segs == 0:
              remove compact.tmp; clear journal   ← clean abort, no data lost
            else:
-             leave compact.tmp + journal in place ← recovery on next boot
+             recover_partial_compaction(committed_segs)  ← same as Case C below, in session
+             if it succeeded:
+               rebuild index from segments; clear journal
+             else:
+               leave compact.tmp + journal in place     ← recovery on next boot
            return false
 
          write_journal(COMMIT)
-         finalize_compaction()   ← rename compact.tmp → segment[0], rebuild index
+         if !finalize_compaction():  ← rename compact.tmp → segment[0], rebuild index
+           return false              ← rename failed: keep journal, next boot retries
          clear_journal()
          return true
 ```
+
+`compact()` wraps this sequence: it first refuses to start if a journal file exists (an earlier
+compaction is awaiting recovery and `compact.tmp` may hold the only copy of some records, which
+Phase 1 would truncate), then flushes the write buffer and closes the active segment (LittleFS and
+FatFS refuse to delete an open file), and on every exit reopens
+`min(current_segment, segment_count - 1)` as the active segment.
 
 ### Space usage during normal compaction
 
@@ -126,9 +137,11 @@ size — compared to up to eight extra segments with the old design.
 |---|---|---|
 | Before Phase 1 journal write | No journal | Normal boot — all segments intact |
 | After Phase 1 journal write, before any segment deleted | `COMPACTING`, `next_seg = 0` | Delete `compact.tmp`; all segments intact |
-| After journaling `next_seg = S+1` but before `remove(segment[S])` | `COMPACTING`, `next_seg = S+1` | Case C recovery (see below); orphaned segment[S] cleaned up by `finalize_compaction()`'s bulk remove |
+| After journaling `next_seg = S+1` but before `remove(segment[S])` | `COMPACTING`, `next_seg = S+1` | Case C recovery (see below), which removes the orphaned segment[S] before the rename |
 | After `remove(segment[S])` and journal `next_seg = S+1` | `COMPACTING`, `next_seg = S+1` | Case C recovery |
-| After `write_journal(COMMIT)` | `COMMIT` | `finalize_compaction()` — identical to original design |
+| During Case C recovery, after the rename but before the journal is cleared | `COMPACTING`, `next_seg > 0`, no `compact.tmp` | Case C recovery again: the rename is skipped and only the index removal is repeated |
+| After `write_journal(COMMIT)`, before the rename | `COMMIT`, `compact.tmp` present | `finalize_compaction()` removes all segments and renames `compact.tmp` → segment 0 |
+| After the rename, before `clear_journal()` | `COMMIT`, no `compact.tmp` | `finalize_compaction()` sees the swap is done: segment 0 is kept and only the index is rebuilt |
 
 ### Case C recovery (`next_seg > 0`)
 
@@ -140,17 +153,25 @@ written up to byte `tmp_valid_size`.  Any bytes beyond `tmp_valid_size` are eith
 - **A partial (torn) record** at the very end.  The scan stops at the first invalid record header
   or missing commit marker, so partial data is silently ignored.
 
-Recovery procedure in `recover_if_needed()`:
+Recovery procedure in `recover_if_needed()`, via `recover_partial_compaction()`:
 
 ```
-rename compact.tmp → segment_0.dat
+if compact.tmp exists:
+  remove segments 0..next_seg-1      ← only segment[next_seg-1] can still be present
+  rename compact.tmp → segment_0.dat ← on failure, keep the journal; next boot retries
+remove the persistent index file     ← its segment-0 offsets predate the compaction
 clear journal
 (return to normal boot)
 ```
 
-Normal boot then calls `rebuild_index_from_segments()` (or loads the saved index if it is still
-valid) across segment 0 (the renamed `compact.tmp`) and segments `next_seg..7`.  The in-memory
-index converges to the correct live-record set:
+Every step can be repeated safely, so a power loss during recovery just re-runs it on the next
+boot.  Removing the index matters: its entries still point at the pre-compaction offsets in
+segment 0 and at the deleted segments, and loading it would make the records now in segment 0
+unreachable.
+
+Normal boot then finds no index and calls `rebuild_index_from_segments()` across segment 0 (the
+renamed `compact.tmp`) and segments `next_seg..7`.  The in-memory index converges to the correct
+live-record set:
 
 - Keys whose only live version was in segments `0..next_seg-1` are found in segment 0.
 - Keys overwritten or deleted in segments `next_seg..7` are resolved by the standard
@@ -158,6 +179,13 @@ index converges to the correct live-record set:
 
 The next compaction cycle (when segments fill up again) consolidates everything into a fresh
 segment 0, cleaning up both the former `compact.tmp` data and any tombstones.
+
+The same procedure runs **in session** when compaction stops mid-way because a write to
+`compact.tmp` failed (typically a full filesystem): `compact()` performs Case C recovery
+immediately, rebuilds and re-prunes the index, and clears the journal, so records from the deleted
+segments stay readable and nothing is left for a later compaction attempt to truncate.  The active
+segment is never among the deleted ones: a write can only fail while copying a segment that holds
+records, and no segment above the active one does.
 
 #### Why not "continue" the interrupted compaction during recovery?
 
@@ -181,6 +209,21 @@ After the rename, the filesystem holds:
 
 Total ≤ `MAX_SEGMENTS × USTORE_DEFAULT_SEGMENT_SIZE` — no additional space is required beyond what was
 already occupied at the time of the crash.
+
+### Filesystem errors (no power loss)
+
+The journal also covers a `rename()` that fails while the device keeps running.  The data that
+existed before compaction is never lost, but the running store is degraded until the next reboot:
+
+| Failure | Until next reboot | At next boot |
+|---|---|---|
+| Rename fails during in-session Case C recovery | Reads of keys that lived in segments `0..next_seg-1` fail; `compact()` refuses to run; new writes go to the active segment | Case C recovery completes; new writes are kept |
+| Rename fails in `finalize_compaction()` | All segments are already deleted, so reads of existing keys fail; `compact()` returns `false` and refuses to run again; **new writes go to a fresh segment** | `finalize_compaction()` retries and completes the swap, **deleting the segments that hold those new writes** |
+
+**Known limitation:** records written between a failed `finalize_compaction()` rename and the next
+reboot are lost.  Closing this gap would mean refusing writes until reboot, which is a behaviour
+change that has deliberately been left out.  Previously the same failure deleted `compact.tmp` too
+and lost all data while `compact()` reported success.
 
 ---
 
