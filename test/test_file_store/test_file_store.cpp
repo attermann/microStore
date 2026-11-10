@@ -34,10 +34,19 @@ static RamFile g_files[16];
 static char    g_names[16][64];
 static int     g_nfiles = 0;
 
-// Fault injection: open() of g_fail_open_path fails, and writes to
-// g_fail_write_path write nothing (as on a full filesystem).
+// Fault injection: open() of g_fail_open_path fails; writes to
+// g_fail_write_path succeed until g_write_budget bytes are used up and then
+// write nothing (as on a full filesystem); rename() fails while g_fail_rename.
 static const char* g_fail_open_path  = nullptr;
 static const char* g_fail_write_path = nullptr;
+static size_t      g_write_budget    = 0;
+static bool        g_fail_rename     = false;
+static bool write_blocked(const char* name, size_t size) {
+    if (!g_fail_write_path || strcmp(g_fail_write_path, name) != 0) return false;
+    if (size > g_write_budget) return true;
+    g_write_budget -= size;
+    return false;
+}
 static bool fault_matches(const char* fault, const char* name) {
     return fault && strcmp(fault, name) == 0;
 }
@@ -72,7 +81,7 @@ protected:
         return f.data[f.pos++];
     }
     virtual size_t write(uint8_t ch) override {
-        if (fault_matches(g_fail_write_path, g_names[_idx])) return 0;
+        if (write_blocked(g_names[_idx], 1)) return 0;
         RamFile& f = g_files[_idx];
         if (f.append_mode) f.pos = f.data.size();
         if (f.pos >= f.data.size()) f.data.resize(f.pos + 1);
@@ -88,7 +97,7 @@ protected:
         return n;
     }
     virtual size_t write(const uint8_t* buffer, size_t size) override {
-        if (fault_matches(g_fail_write_path, g_names[_idx])) return 0;
+        if (write_blocked(g_names[_idx], size)) return 0;
         RamFile& f = g_files[_idx];
         if (f.append_mode) f.pos = f.data.size();
         size_t need = f.pos + size;
@@ -157,6 +166,7 @@ protected:
         return true;
     }
     virtual bool rename(const char* src, const char* dst) override {
+        if (g_fail_rename) return false;
         int si = find_file(src); if (si < 0) return false;
         int di = find_file(dst);
         if (di >= 0) {
@@ -189,6 +199,8 @@ static void reset_ram_fs() {
     g_nfiles = 0;
     g_fail_open_path  = nullptr;
     g_fail_write_path = nullptr;
+    g_write_budget    = 0;
+    g_fail_rename     = false;
 }
 static microStore::FileSystem make_ram_fs() { return microStore::FileSystem{new RamFileSystemImpl()}; }
 
@@ -803,6 +815,188 @@ void test_file_store_rotation_compact_failure_no_stray_segment() {
 }
 
 /* ===========================================================================
+ * Compaction recovery tests
+ *
+ * These recreate the on-flash state left by a power loss or filesystem error
+ * at specific points in compaction, then check that the data survives.
+ * =========================================================================== */
+
+static size_t ram_file_size(const char* name) {
+    int idx = find_file(name);
+    return idx < 0 ? 0 : g_files[idx].data.size();
+}
+
+static void write_ram_journal(uint32_t state, uint32_t next_seg, uint32_t tmp_valid_size) {
+    microStore::Journal j;
+    j.magic = microStore::JOURNAL_MAGIC; j.state = state;
+    j.next_seg = next_seg; j.tmp_valid_size = tmp_valid_size;
+    int idx = find_file("/p_journal.dat");
+    if (idx < 0) { idx = alloc_slot(); strncpy(g_names[idx], "/p_journal.dat", 63); }
+    g_files[idx].data.assign((uint8_t*)&j, (uint8_t*)&j + sizeof(j));
+    g_files[idx].pos = 0;
+}
+
+static void assert_value(microStore::FileStore& store, const char* key, const char* val) {
+    uint8_t buf[128]; uint16_t sz = sizeof(buf);
+    TEST_ASSERT_TRUE_MESSAGE(store.get(key, buf, &sz), key);
+    TEST_ASSERT_EQUAL(strlen(val), sz);
+    TEST_ASSERT_EQUAL(0, memcmp(buf, val, sz));
+}
+
+static const char* VAL80 = "0123456789012345678901234567890123456789"
+                           "0123456789012345678901234567890123456789";
+
+// Power loss after finalize_compaction() renamed compact.tmp to seg0 but before
+// the COMMIT journal was cleared. Boot recovery must not finalize a second time:
+// that would delete the freshly compacted seg0 and find no compact.tmp to rename.
+void test_recovery_commit_journal_after_swap_keeps_data() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p");
+        store.put("a", "v1", /*ttl=*/0, now);
+        store.put("b", "v2", /*ttl=*/0, now);
+        store.remove("b");
+        TEST_ASSERT_TRUE(store.compact());
+    }
+    write_ram_journal(microStore::JOURNAL_COMMIT, 0, 0);   // journal never cleared
+
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p");
+    TEST_ASSERT_TRUE(find_file("/p_journal.dat") < 0);
+    TEST_ASSERT_EQUAL(1u, reader.size());
+    assert_value(reader, "a", "v1");
+}
+
+// If renaming compact.tmp to seg0 fails after the source segments are deleted,
+// compact.tmp is the only copy of the data. It must be kept, compact() must
+// report failure, no further compaction may overwrite it, and the next boot
+// must complete the swap.
+void test_recovery_finalize_rename_failure_keeps_data() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p");
+        store.put("a", "v1", /*ttl=*/0, now);
+        store.put("b", "v2", /*ttl=*/0, now);
+        g_fail_rename = true;
+        TEST_ASSERT_FALSE(store.compact());
+        TEST_ASSERT_TRUE(find_file("/p_compact.tmp") >= 0);
+        TEST_ASSERT_TRUE(find_file("/p_journal.dat") >= 0);
+        size_t tmp_size = ram_file_size("/p_compact.tmp");
+        TEST_ASSERT_FALSE(store.compact());                 // refused: recovery pending
+        TEST_ASSERT_EQUAL(tmp_size, ram_file_size("/p_compact.tmp"));
+        g_fail_rename = false;
+    }
+
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p");
+    TEST_ASSERT_TRUE(find_file("/p_compact.tmp") < 0);
+    TEST_ASSERT_TRUE(find_file("/p_journal.dat") < 0);
+    TEST_ASSERT_EQUAL(2u, reader.size());
+    assert_value(reader, "a", "v1");
+    assert_value(reader, "b", "v2");
+}
+
+// Builds a store whose compaction aborts mid-way: seg0 holds a dead copy of "a"
+// and a live "b"; seg1 holds "c" and the live "a". compact.tmp has room for
+// exactly one record, so seg0 is committed and deleted, then seg1 fails.
+// Because "a" is dead in seg0, "b" moves from offset R in seg0 to offset 0 in
+// compact.tmp, so a stale index would point at the wrong record.
+static void put_midway_abort_records(microStore::FileStore& store) {
+    uint32_t now = microStore::time();
+    store.put("a", VAL80, /*ttl=*/0, now);
+    store.put("b", "vb" , /*ttl=*/0, now);
+    store.put("c", VAL80, /*ttl=*/0, now);
+    store.put("a", "va" , /*ttl=*/0, now);
+    TEST_ASSERT_TRUE(find_file("/p_seg1.dat") >= 0);
+    TEST_ASSERT_TRUE(find_file("/p_seg2.dat") < 0);
+    g_fail_write_path = "/p_compact.tmp";
+    g_write_budget    = ram_file_size("/p_seg0.dat") - (sizeof(microStore::RecordHeader) + 1 + 80 + sizeof(microStore::RecordCommit));
+}
+
+static void assert_midway_records(microStore::FileStore& store) {
+    assert_value(store, "a", "va");
+    assert_value(store, "b", "vb");
+    assert_value(store, "c", VAL80);
+}
+
+// A mid-way abort in a running store must recover immediately: records from the
+// deleted segments stay readable, and no journal or compact.tmp is left behind
+// for a later compaction attempt to truncate.
+void test_recovery_midway_abort_recovers_in_session() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/4);
+        put_midway_abort_records(store);
+        TEST_ASSERT_FALSE(store.compact());
+        TEST_ASSERT_TRUE(find_file("/p_seg0.dat") >= 0);     // compact.tmp renamed into place
+        TEST_ASSERT_TRUE(find_file("/p_compact.tmp") < 0);
+        TEST_ASSERT_TRUE(find_file("/p_journal.dat") < 0);
+        g_fail_write_path = nullptr;
+        // Write before reading: the RAM fs shares one position/mode per file, so
+        // a read handle on the active segment would disturb later appends.
+        TEST_ASSERT_TRUE(store.put("z", "vz", /*ttl=*/0, now));
+        assert_midway_records(store);                        // readable without a reboot
+        assert_value(store, "z", "vz");
+    }
+
+    microStore::FileStore reader;                            // persistent index intact
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/4);
+    TEST_ASSERT_EQUAL(4u, reader.size());
+    assert_midway_records(reader);
+    assert_value(reader, "z", "vz");
+}
+
+// If the mid-way abort cannot be recovered in session (rename fails), the
+// journal and compact.tmp must be left for boot, no further compaction may
+// truncate compact.tmp, and boot recovery must rebuild the index rather than
+// trust the persistent index, whose seg0 offsets predate the compaction.
+void test_recovery_midway_abort_recovers_at_boot() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/4);
+        put_midway_abort_records(store);
+        g_fail_rename = true;
+        TEST_ASSERT_FALSE(store.compact());
+        g_fail_write_path = nullptr;
+        TEST_ASSERT_TRUE(find_file("/p_compact.tmp") >= 0);
+        TEST_ASSERT_TRUE(find_file("/p_journal.dat") >= 0);
+        size_t tmp_size = ram_file_size("/p_compact.tmp");
+        TEST_ASSERT_FALSE(store.compact());                 // refused: recovery pending
+        TEST_ASSERT_EQUAL(tmp_size, ram_file_size("/p_compact.tmp"));
+        TEST_ASSERT_TRUE(store.put("z", "vz", /*ttl=*/0, now));
+        g_fail_rename = false;
+    }
+
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/4);
+    TEST_ASSERT_TRUE(find_file("/p_compact.tmp") < 0);
+    TEST_ASSERT_TRUE(find_file("/p_journal.dat") < 0);
+    TEST_ASSERT_EQUAL(4u, reader.size());
+    assert_midway_records(reader);
+    assert_value(reader, "z", "vz");
+}
+
+/* ===========================================================================
  * Directory-mode prefix tests
  *
  * When the prefix passed to init() ends with '/', FileStore should treat it as
@@ -937,6 +1131,11 @@ int runUnityTests(void) {
     RUN_TEST(test_file_store_compact_failure_keeps_store_writable);
     RUN_TEST(test_file_store_threshold_compact_failure_keeps_store_writable);
     RUN_TEST(test_file_store_rotation_compact_failure_no_stray_segment);
+    // Compaction recovery
+    RUN_TEST(test_recovery_commit_journal_after_swap_keeps_data);
+    RUN_TEST(test_recovery_finalize_rename_failure_keeps_data);
+    RUN_TEST(test_recovery_midway_abort_recovers_in_session);
+    RUN_TEST(test_recovery_midway_abort_recovers_at_boot);
     // Directory-mode prefix
     RUN_TEST(test_dir_prefix_segment_and_index_names);
     RUN_TEST(test_legacy_prefix_unchanged);
