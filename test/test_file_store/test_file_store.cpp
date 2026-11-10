@@ -34,6 +34,14 @@ static RamFile g_files[16];
 static char    g_names[16][64];
 static int     g_nfiles = 0;
 
+// Fault injection: open() of g_fail_open_path fails, and writes to
+// g_fail_write_path write nothing (as on a full filesystem).
+static const char* g_fail_open_path  = nullptr;
+static const char* g_fail_write_path = nullptr;
+static bool fault_matches(const char* fault, const char* name) {
+    return fault && strcmp(fault, name) == 0;
+}
+
 static int find_file(const char* name) {
     for (int i = 0; i < g_nfiles; i++)
         if (g_names[i][0] != '\0' && strcmp(g_names[i], name) == 0) return i;
@@ -64,6 +72,7 @@ protected:
         return f.data[f.pos++];
     }
     virtual size_t write(uint8_t ch) override {
+        if (fault_matches(g_fail_write_path, g_names[_idx])) return 0;
         RamFile& f = g_files[_idx];
         if (f.append_mode) f.pos = f.data.size();
         if (f.pos >= f.data.size()) f.data.resize(f.pos + 1);
@@ -79,6 +88,7 @@ protected:
         return n;
     }
     virtual size_t write(const uint8_t* buffer, size_t size) override {
+        if (fault_matches(g_fail_write_path, g_names[_idx])) return 0;
         RamFile& f = g_files[_idx];
         if (f.append_mode) f.pos = f.data.size();
         size_t need = f.pos + size;
@@ -110,6 +120,7 @@ protected:
     virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
         bool wr = (mode == microStore::File::ModeWrite || mode == microStore::File::ModeReadWrite);
         bool ap = (mode == microStore::File::ModeAppend || mode == microStore::File::ModeReadAppend);
+        if (fault_matches(g_fail_open_path, path)) return {};
         int idx = find_file(path);
         if (wr) {
             if (idx < 0) { idx = alloc_slot(); if (idx < 0) return {}; strncpy(g_names[idx], path, 63); g_names[idx][63] = '\0'; }
@@ -176,6 +187,8 @@ static void reset_ram_fs() {
         g_names[i][0] = '\0';
     }
     g_nfiles = 0;
+    g_fail_open_path  = nullptr;
+    g_fail_write_path = nullptr;
 }
 static microStore::FileSystem make_ram_fs() { return microStore::FileSystem{new RamFileSystemImpl()}; }
 
@@ -702,6 +715,93 @@ void test_file_store_compact_keeps_store_writable() {
     TEST_ASSERT_EQUAL(0, memcmp(buf, "v3", 2));
 }
 
+// Reload the store from its segment files only and check that `key` holds `val`.
+static void assert_survives_rebuild(const char* key, const char* val) {
+    remove_ram_file("/p_index.dat");   // force a rebuild from the segment files
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p");
+    uint8_t buf[32]; uint16_t sz = sizeof(buf);
+    TEST_ASSERT_TRUE(reader.get(key, buf, &sz));
+    TEST_ASSERT_EQUAL(strlen(val), sz);
+    TEST_ASSERT_EQUAL(0, memcmp(buf, val, sz));
+}
+
+// A direct compact() that fails before writing anything (compact.tmp cannot be
+// opened) must still leave an active segment open for subsequent writes.
+void test_file_store_compact_failure_keeps_store_writable() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p");
+        store.put("a", "v1", /*ttl=*/0, now);
+        g_fail_open_path = "/p_compact.tmp";
+        TEST_ASSERT_FALSE(store.compact());
+        g_fail_open_path = nullptr;
+        TEST_ASSERT_TRUE(store.put("c", "v3", /*ttl=*/0, now));
+        TEST_ASSERT_TRUE(store.exists("c"));
+    }
+    assert_survives_rebuild("a", "v1");
+    assert_survives_rebuild("c", "v3");
+}
+
+// A failed threshold-triggered compaction must leave the store writable. With
+// max_recs=4 a single dead record crosses the 25% threshold, so every put and
+// remove below attempts (and fails) a compaction.
+void test_file_store_threshold_compact_failure_keeps_store_writable() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        store.set_max_recs(4);
+        auto fs = make_ram_fs();
+        store.init(fs, "/p");
+        store.put("a", "v1", /*ttl=*/0, now);
+        store.put("b", "v2", /*ttl=*/0, now);
+        g_fail_open_path = "/p_compact.tmp";
+        TEST_ASSERT_TRUE(store.remove("a"));                 // triggers a failed compaction
+        TEST_ASSERT_TRUE(store.put("c", "v3", /*ttl=*/0, now));  // must still be writable
+        TEST_ASSERT_TRUE(store.exists("c"));
+        g_fail_open_path = nullptr;
+    }
+    assert_survives_rebuild("b", "v2");
+    assert_survives_rebuild("c", "v3");
+}
+
+// When rotation runs out of segments it advances current_segment to
+// segment_count before compacting. If that compaction fails, the store must
+// reopen the last real segment and must not create seg<segment_count>.dat.
+void test_file_store_rotation_compact_failure_no_stray_segment() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    const char* val = "0123456789012345678901234567890123456789"
+                      "0123456789012345678901234567890123456789";   // 80 bytes
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/2);
+        g_fail_write_path = "/p_compact.tmp";                // compaction aborts on first record
+        char key[8];
+        for (int i = 0; i < 8; i++) {
+            snprintf(key, sizeof(key), "k%d", i);
+            store.put(key, val, /*ttl=*/0, now);
+        }
+        TEST_ASSERT_TRUE(find_file("/p_seg1.dat") >= 0);    // rotation reached the last segment
+        TEST_ASSERT_TRUE(find_file("/p_seg2.dat") < 0);     // no out-of-range segment created
+        TEST_ASSERT_TRUE(find_file("/p_compact.tmp") < 0);  // aborted compaction cleaned up
+        g_fail_write_path = nullptr;
+        TEST_ASSERT_TRUE(store.put("z", "v9", /*ttl=*/0, now));
+        TEST_ASSERT_TRUE(store.exists("z"));
+    }
+    TEST_ASSERT_TRUE(find_file("/p_seg2.dat") < 0);
+    assert_survives_rebuild("z", "v9");
+}
+
 /* ===========================================================================
  * Directory-mode prefix tests
  *
@@ -834,6 +934,9 @@ int runUnityTests(void) {
     RUN_TEST(test_file_store_ttl_exists_expires);
     RUN_TEST(test_file_store_compact_basic);
     RUN_TEST(test_file_store_compact_keeps_store_writable);
+    RUN_TEST(test_file_store_compact_failure_keeps_store_writable);
+    RUN_TEST(test_file_store_threshold_compact_failure_keeps_store_writable);
+    RUN_TEST(test_file_store_rotation_compact_failure_no_stray_segment);
     // Directory-mode prefix
     RUN_TEST(test_dir_prefix_segment_and_index_names);
     RUN_TEST(test_legacy_prefix_unchanged);

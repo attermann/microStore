@@ -1454,12 +1454,30 @@ public:
 	bool compact()
 	{
 USTORE_LOG("[ustore] Compacting storage...\n");
-		// The active segment is one of the sources removed below. LittleFS
-		// and FatFS refuse to unlink a file that is still open (POSIX would
-		// allow it), so close it first. Both exit paths reopen a segment so
-		// the store stays writable for callers that invoke compact() directly.
+		// The active segment is one of the sources compact_segments() removes.
+		// LittleFS and FatFS refuse to unlink a file that is still open (POSIX
+		// allows it), so flush and close it first. Every exit path then reopens
+		// an in-range segment so the store stays writable whatever the outcome:
+		// seg0 after success (internal callers then move on to seg1), otherwise
+		// the previously active segment, clamped because rotate_segment_if_needed()
+		// has already advanced current_segment to _segment_count.
+		//
+		// Power loss: the flush and close happen before compact_segments() writes
+		// the COMPACTING journal, and the reopen happens after it has cleared the
+		// journal (or deliberately left it for boot-time recovery). Opening a
+		// segment writes nothing, so crash recovery is unaffected.
+		flush_buffer();
 		if (active_file) active_file.close();
+		bool ok = compact_segments();
+		open_segment(std::min<uint32_t>(current_segment, (uint32_t)_segment_count - 1));
+		return ok;
+	}
 
+private:
+	// Body of compact(). Must only be called with the active segment closed;
+	// the caller is responsible for reopening one afterwards.
+	bool compact_segments()
+	{
 		// --- Phase 1: write COMPACTING journal (next_seg=0: no source segments deleted yet) ---
 		write_journal(JOURNAL_COMPACTING, 0, 0);
 
@@ -1568,7 +1586,6 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		outf.close();
 
 		if (!write_ok) {
-			open_segment(current_segment);   // keep the store writable after a failed compaction
 			if (committed_segs == 0) {
 				// No source segments were deleted — safe to discard compact.tmp entirely.
 				USTORE_LOG("[ustore] WARNING: Compact aborted: storage full, all segments preserved\n");
@@ -1588,7 +1605,6 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		write_journal(JOURNAL_COMMIT);
 
 		finalize_compaction();   // rename + index rebuild
-		open_segment(current_segment);   // seg0 = compacted data; internal callers move on to seg1
 
 		clear_journal();
 

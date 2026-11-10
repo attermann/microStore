@@ -6,6 +6,10 @@
 
 - Added `AnyStore`, a type-erased wrapper that selects any store backend (`FileStore`, `HeapStore`, or custom) at runtime and works with `TypedStore`.
 
+### Fixed
+
+- Fixed `FileStore` compaction running with the active segment still open, which LittleFS and FatFS refuse to delete, and fixed the store being left without a writable segment (or with a stray out-of-range segment file) after a failed compaction (#6, #11).
+
 ## [0.1.7] - 2026-06-27
 
 ### Added
