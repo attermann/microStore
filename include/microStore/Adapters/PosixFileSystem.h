@@ -315,10 +315,7 @@ protected:
 		}
 
 		inline virtual bool rmdir(const char* path) override {
-			if (::rmdir(path) == 0) {
-				return false;
-			}
-			return true;
+			return (::rmdir(path) == 0);
 		}
 
 
