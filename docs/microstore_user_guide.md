@@ -278,7 +278,7 @@ if (store.exists("blob.0")) { /* ... */ }
 
 ### 6.3 Iterating
 
-Both `FileStore` and `HeapStore` expose a forward iterator yielding `Entry { key, value, timestamp, ttl }`, and the standard `begin()` / `end()` pair makes them work with range-based `for`. The `TypedStore` iterator forwards through these and decodes the `key` / `value` for you on each step.
+Both `FileStore` and `HeapStore` expose a forward iterator yielding `Entry { key, value, timestamp, ttl }`, and the standard `begin()` / `end()` pair makes them work with range-based `for`. The `TypedStore` iterator forwards through these and decodes the `key` / `value` for you on dereference (`*it`), so advancing with `++` without dereferencing does no disk I/O; dereferencing twice at the same position decodes only once.
 
 #### What the iterator does — and does not — touch
 

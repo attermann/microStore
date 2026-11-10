@@ -341,7 +341,6 @@ void test_typed_store_iterator() {
     TEST_ASSERT_EQUAL_STRING("C",   seen["gamma"].c_str());
 }
 
-// TypedStore<string, vector<uint8_t>> round-trips raw binary values.
 void test_typed_store_iterator_advance_reads_nothing() {
     reset_ram_fs();
 
@@ -392,6 +391,7 @@ void test_typed_store_iterator_advance_reads_nothing() {
     TEST_ASSERT_EQUAL(first, g_opens);
 }
 
+// TypedStore<string, vector<uint8_t>> round-trips raw binary values.
 void test_typed_store_vector_value() {
     reset_ram_fs();
 
