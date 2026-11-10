@@ -1104,6 +1104,41 @@ void test_dir_prefix_compact() {
 void setUp()    {}
 void tearDown() {}
 
+// A store needs two segments: compaction fills seg0 and new writes go to seg1.
+// Asked for one, init() must use two, or every write after the first
+// compaction lands outside the scanned range and is lost on reload.
+void test_file_store_single_segment_count_keeps_data() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time() - 10;
+    char k[8], v[32];
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/1);
+        // Overwrite ten keys six times: enough to fill a 256-byte segment
+        // several times over and force repeated compaction.
+        for (int i = 0; i < 60; i++) {
+            snprintf(k, sizeof(k), "k%02d", i % 10);
+            snprintf(v, sizeof(v), "value-%02d-xxxxxxxx", i);
+            TEST_ASSERT_TRUE(store.put(k, v, /*ttl=*/0, now));
+        }
+    }
+
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p", /*clearOnInit=*/false, /*segment_size=*/256, /*segment_count=*/1);
+    TEST_ASSERT_EQUAL(10u, reader.size());
+    for (int i = 0; i < 10; i++) {
+        snprintf(k, sizeof(k), "k%02d", i);
+        snprintf(v, sizeof(v), "value-%02d-xxxxxxxx", 50 + i);
+        uint8_t buf[64]; uint16_t sz = sizeof(buf);
+        TEST_ASSERT_TRUE(reader.get(k, buf, &sz));
+        TEST_ASSERT_EQUAL(strlen(v), sz);
+        TEST_ASSERT_EQUAL(0, memcmp(buf, v, sz));
+    }
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     // TTL tests
@@ -1127,6 +1162,7 @@ int runUnityTests(void) {
     // Additional edge-case tests
     RUN_TEST(test_file_store_ttl_exists_expires);
     RUN_TEST(test_file_store_compact_basic);
+    RUN_TEST(test_file_store_single_segment_count_keeps_data);
     RUN_TEST(test_file_store_compact_keeps_store_writable);
     RUN_TEST(test_file_store_compact_failure_keeps_store_writable);
     RUN_TEST(test_file_store_threshold_compact_failure_keeps_store_writable);

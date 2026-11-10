@@ -142,6 +142,14 @@ public:
 	{
 		if (segment_size > 0) _segment_size = segment_size;
 		if (segment_count > 0) _segment_count = segment_count;
+		// Compaction writes the live records into seg0 and new writes then go to
+		// seg1, so a store needs at least two segments. With one, every write
+		// after the first compaction lands in seg1, outside the range that
+		// compaction and index rebuilds scan, and is lost on the next reload.
+		if (_segment_count < 2) {
+			USTORE_LOG("[ustore] init: segment_count %u is below the minimum of 2, using 2\n", _segment_count);
+			_segment_count = 2;
+		}
 		USTORE_LOG("[ustore] init: Initializing FileStore with prefix=%s, segment_size=%u, segment_count=%u\n", prefix, _segment_size, _segment_count);
 
 		_filesystem = filesystem;
