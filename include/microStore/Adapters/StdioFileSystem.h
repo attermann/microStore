@@ -19,6 +19,7 @@
 #include "../File.h"
 #include "../FileSystem.h"
 #include "../Log.h"
+#include "../Path.h"
 
 #if defined(ESP32)
 #include <LittleFS.h>
@@ -187,7 +188,9 @@ protected:
 	class FileSystemImpl : public microStore::FileSystemImpl {
 
 	public:
-		FileSystemImpl(const char* basepath = "") : _basepath(basepath) {}
+		FileSystemImpl(const char* basepath = "") {
+			_basepath_ok = Path::copy_base(_basepath, sizeof(_basepath), basepath);
+		}
 	    virtual ~FileSystemImpl() {}
 
 	public:
@@ -207,9 +210,21 @@ protected:
 
 		inline virtual bool init(bool reformatOnFail = true) override {
 			USTORE_LOG("[ustore] Initializing StdioFileSystem\n");
+			if (!_basepath_ok) {
+				USTORE_LOG("[ustore] StdioFileSystem base path longer than %d characters!\n", USTORE_MAX_BASEPATH_LEN - 1);
+				return false;
+			}
 #if defined(ESP32)
-			// Initialize LittleFS for POSIX file access
-			if (!LittleFS.begin(true, _basepath)) {
+			// Initialize LittleFS for POSIX file access. The base path is the
+			// mount point; Arduino keeps the pointer, so pass storage that
+			// outlives this adapter.
+			bool conflict = false;
+			const char* mount = Path::persistent_mount(_basepath, &conflict);
+			if (conflict) {
+				USTORE_LOG("[ustore] WARNING: LittleFS already mounted at \"%s\", ignoring base path \"%s\"\n", mount, _basepath);
+				Path::copy_base(_basepath, sizeof(_basepath), mount);
+			}
+			if (!LittleFS.begin(true, mount)) {
 				USTORE_LOG("[ustore] Failed to initialize StdioFileSystem!\n");
 				return false;
 			}
@@ -236,7 +251,8 @@ protected:
 			return true;
 		}
 
-		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+		virtual microStore::File open(const char* path_in, microStore::File::Mode mode, const bool create = false) override {
+			USTORE_RESOLVE_PATH(path, path_in, {});
 			const char* pmode;
 			switch (mode) {
 				// Read only. File must exist. ("r")
@@ -271,7 +287,8 @@ protected:
 		}
 
 
-		inline virtual bool exists(const char* path) override {
+		inline virtual bool exists(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			FILE* file = ::fopen(path, "r");
 			if (file != nullptr) {
 				::fclose(file);
@@ -280,20 +297,25 @@ protected:
 			return false;
 		}
 
-		inline virtual bool remove(const char* path) override {
+		inline virtual bool remove(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return (::remove(path) == 0);
 		}
 
-		inline virtual bool rename(const char* from_path, const char* to_path) override {
+		inline virtual bool rename(const char* from_in, const char* to_in) override {
+			USTORE_RESOLVE_PATH(from_path, from_in, false);
+			USTORE_RESOLVE_PATH(to_path, to_in, false);
 			return (::rename(from_path, to_path) == 0);
 		}
 
-		inline virtual bool isDirectory(const char* path) override {
+		inline virtual bool isDirectory(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			struct stat st = {0};
 			return (::stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 		}
 
-		inline virtual bool mkdir(const char* path) override {
+		inline virtual bool mkdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			struct stat st = {0};
 			if (::stat(path, &st) == 0) {
 				if (S_ISDIR(st.st_mode)) return true;
@@ -302,13 +324,15 @@ protected:
 			return (::mkdir(path, 0700) == 0);
 		}
 
-		inline virtual bool rmdir(const char* path) override {
+		inline virtual bool rmdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return (::rmdir(path) == 0);
 		}
 
 
-		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
+		virtual std::list<std::string> listDirectory(const char* path_in, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
+			USTORE_RESOLVE_PATH(path, path_in, files);
 			DIR *dir = ::opendir(path);
 			if (dir == NULL) {
 				return files;
@@ -344,7 +368,21 @@ protected:
 		}
 
 	private:
-		const char* _basepath = "";
+		// Root for every path: the host directory on a native OS (empty means
+		// the current directory), or the LittleFS mount point on ESP32.
+		inline const char* resolve(const char* path, char* buf, size_t n) const {
+			if (!_basepath_ok) return nullptr;
+#if defined(ESP32)
+			const char* resolved = Path::join(_basepath, path, buf, n);
+#else
+			const char* resolved = Path::join(_basepath[0] ? _basepath : ".", path, buf, n);
+#endif
+			if (resolved == nullptr) USTORE_LOG("[ustore] StdioFileSystem: path too long: %s\n", path ? path : "(null)");
+			return resolved;
+		}
+
+		char _basepath[USTORE_MAX_BASEPATH_LEN];
+		bool _basepath_ok = false;
 	};
 
 };
