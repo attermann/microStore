@@ -669,6 +669,39 @@ void test_file_store_compact_basic() {
     TEST_ASSERT_EQUAL(0, memcmp(buf, "v3", 2));
 }
 
+// A direct compact() call must leave the store writable. The active segment is
+// one of the source segments compaction deletes, so compact() has to close it
+// (LittleFS/FatFS refuse to unlink an open file) and reopen a segment before
+// returning; otherwise records written afterwards go to a stale handle and are
+// lost on reload.
+void test_file_store_compact_keeps_store_writable() {
+    reset_ram_fs();
+
+    uint32_t now = microStore::time();
+    {
+        microStore::FileStore store;
+        auto fs = make_ram_fs();
+        store.init(fs, "/p");
+        store.put("a", "v1", /*ttl=*/0, now);
+        store.put("b", "v2", /*ttl=*/0, now);
+        store.remove("b");
+        TEST_ASSERT_TRUE(store.compact());
+        store.put("c", "v3", /*ttl=*/0, now);   // written after compaction
+        TEST_ASSERT_TRUE(store.exists("c"));
+    }
+    remove_ram_file("/p_index.dat");   // force a rebuild from the segment files
+
+    microStore::FileStore reader;
+    auto fs = make_ram_fs();
+    reader.init(fs, "/p");
+
+    TEST_ASSERT_EQUAL(2u, reader.size());   // a(v1) and c(v3)
+    uint8_t buf[32]; uint16_t sz = sizeof(buf);
+    TEST_ASSERT_TRUE(reader.get("c", buf, &sz));
+    TEST_ASSERT_EQUAL(2u, sz);
+    TEST_ASSERT_EQUAL(0, memcmp(buf, "v3", 2));
+}
+
 /* ===========================================================================
  * Directory-mode prefix tests
  *
@@ -800,6 +833,7 @@ int runUnityTests(void) {
     // Additional edge-case tests
     RUN_TEST(test_file_store_ttl_exists_expires);
     RUN_TEST(test_file_store_compact_basic);
+    RUN_TEST(test_file_store_compact_keeps_store_writable);
     // Directory-mode prefix
     RUN_TEST(test_dir_prefix_segment_and_index_names);
     RUN_TEST(test_legacy_prefix_unchanged);
