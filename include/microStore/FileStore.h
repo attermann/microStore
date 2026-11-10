@@ -1316,8 +1316,10 @@ USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, max=%u)
 		char tmp_path[USTORE_MAX_FILENAME_LEN]; tmp_name(tmp_path);
 
 		if (j.state == JOURNAL_COMMIT) {
-			// Tmp file is complete — finish the swap.
-			finalize_compaction();
+			// Tmp file is complete — finish the swap (or, if power was lost after
+			// the swap but before the journal was cleared, just rebuild the index).
+			if (!finalize_compaction())
+				return;  // keep journal so next boot retries
 		} else if (j.next_seg == 0) {
 			// COMPACTING, no source segments deleted yet — tmp may be partial, discard it.
 			// All original segments are intact; normal boot proceeds.
@@ -1329,39 +1331,89 @@ USTORE_LOG("[ustore] Compaction triggered by deleted threshold (dead=%u, max=%u)
 			// or a partial write stopped by the crash — both are handled harmlessly by the
 			// segment scan in rebuild_index_from_segments()).
 			//
-			// Recovery strategy: rename compact.tmp → segment_0.dat so that the normal
-			// boot index rebuild picks it up alongside the surviving segments next_seg..7.
-			// The next compaction cycle will consolidate everything correctly.
-			char seg0[USTORE_MAX_FILENAME_LEN]; segment_name(0, seg0);
-			if (!_filesystem.rename(tmp_path, seg0)) {
-				// Rename failed (e.g. filesystem error). Best effort: leave compact.tmp
-				// in place; the next boot will retry this same recovery path.
+			// Recovery strategy: rename compact.tmp → segment_0.dat and drop the
+			// persistent index so init() rebuilds it from seg0 plus the surviving
+			// segments next_seg..N-1. The next compaction consolidates everything.
+			if (!recover_partial_compaction(j.next_seg))
 				return;  // keep journal so next boot retries
-			}
 		}
 
 		_filesystem.remove(name);  // clear journal
 	}
 
+	// Completes a compaction that stopped after committing source segments
+	// 0..next_seg-1 to compact.tmp (and deleting them): moves compact.tmp into
+	// place as seg0 and removes the persistent index, whose seg0 offsets predate
+	// the compaction. The caller rebuilds the index and then clears the journal.
+	//
+	// Idempotent across power loss: if compact.tmp is already gone the rename
+	// has happened, so only the index removal is repeated. Returns false (journal
+	// must be kept) if the rename fails.
+	bool recover_partial_compaction(uint32_t next_seg)
+	{
+		char tmp_path[USTORE_MAX_FILENAME_LEN]; tmp_name(tmp_path);
+		if (_filesystem.exists(tmp_path)) {
+			// Every record of segments 0..next_seg-1 is in compact.tmp. Only the
+			// last of them can still exist (power loss between its journal update
+			// and its delete); remove it so its records are not indexed twice and
+			// so the rename does not have to replace an existing seg0.
+			if (next_seg > _segment_count) next_seg = _segment_count;
+			for (uint32_t i = 0; i < next_seg; i++) {
+				char sname[USTORE_MAX_FILENAME_LEN]; segment_name(i, sname);
+				_filesystem.remove(sname);
+			}
+			char seg0[USTORE_MAX_FILENAME_LEN]; segment_name(0, seg0);
+			if (!_filesystem.rename(tmp_path, seg0)) {
+				USTORE_LOG("[ustore] ERROR: Failed to move %s to %s, recovery deferred\n", tmp_path, seg0);
+				return false;
+			}
+		}
+		char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
+		if (index_file) index_file.close();
+		_filesystem.remove(iname);
+		return true;
+	}
+
 	/* -------- FINALIZE COMPACTION -------- */
 
-	void finalize_compaction()
+	// Swaps the completed compact.tmp in as seg0 and rebuilds the index from it.
+	// Only called with a COMMIT journal on flash. Returns false if the swap could
+	// not be completed; compact.tmp then holds the only copy of the data, so the
+	// caller must keep the journal and the next boot retries.
+	//
+	// Known limitation: if the rename fails in a running store (a filesystem
+	// error, not a power loss), every segment has already been removed, so until
+	// the next reboot reads of existing keys fail, and records written in the
+	// meantime go to a fresh segment that boot recovery then deletes when it
+	// completes the swap. The pre-compaction data itself is preserved. Refusing
+	// writes until reboot would close this gap but is a behaviour change that
+	// was deliberately left out. See docs/incremental_compaction.md.
+	bool finalize_compaction()
 	{
 		char tmp_path[USTORE_MAX_FILENAME_LEN]; tmp_name(tmp_path);
 		char seg0[USTORE_MAX_FILENAME_LEN];
 		segment_name(0, seg0);
 
-		// Remove all existing segments, then rename tmp → seg0.
-		for (uint32_t i = 0; i < _segment_count; i++) {
-			char sname[USTORE_MAX_FILENAME_LEN];
-			segment_name(i, sname);
+		// COMMIT is only written once compact.tmp is complete, so a missing
+		// compact.tmp means the rename below already happened and power was lost
+		// before the journal was cleared. seg0 is then the compacted data: do not
+		// delete it, just rebuild the index from it.
+		if (_filesystem.exists(tmp_path)) {
+			// Remove all existing segments, then rename tmp → seg0.
+			for (uint32_t i = 0; i < _segment_count; i++) {
+				char sname[USTORE_MAX_FILENAME_LEN];
+				segment_name(i, sname);
 USTORE_LOG("[ustore] Removing file: %s\n", sname);
-			_filesystem.remove(sname);
-		}
+				_filesystem.remove(sname);
+			}
 USTORE_LOG("[ustore] Moving temporary file to: %s\n", seg0);
-		if (!_filesystem.rename(tmp_path, seg0)) {
-			_filesystem.remove(tmp_path);
-			return;
+			if (!_filesystem.rename(tmp_path, seg0)) {
+				USTORE_LOG("[ustore] ERROR: Failed to move %s to %s, recovery deferred to next boot\n", tmp_path, seg0);
+				return false;
+			}
+		}
+		else {
+			USTORE_LOG("[ustore] finalize: %s already in place, rebuilding index\n", seg0);
 		}
 
 		// Rebuild in-memory index by scanning seg0.
@@ -1398,6 +1450,7 @@ USTORE_LOG("[ustore] Moving temporary file to: %s\n", seg0);
 
 		current_segment = 0;
 		// current_offset is set by open_segment() which the caller will invoke next.
+		return true;
 	}
 
 	/* -------- INDEX REBUILD FROM LOG -------- */
@@ -1464,6 +1517,16 @@ USTORE_LOG("[ustore] Compacting storage...\n");
 		// the COMPACTING journal, and the reopen happens after it has cleared the
 		// journal (or deliberately left it for boot-time recovery). Opening a
 		// segment writes nothing, so crash recovery is unaffected.
+
+		// A journal left on flash means an earlier compaction could not be
+		// completed and compact.tmp may hold the only copy of some records.
+		// Starting another compaction would truncate it, so leave it for boot.
+		char jname[USTORE_MAX_FILENAME_LEN]; journal_name(jname);
+		if (_filesystem.exists(jname)) {
+			USTORE_LOG("[ustore] WARNING: Compact skipped: recovery of an earlier compaction is pending\n");
+			return false;
+		}
+
 		flush_buffer();
 		if (active_file) active_file.close();
 		bool ok = compact_segments();
@@ -1495,8 +1558,8 @@ USTORE_LOG("[ustore] Opening tmp file: %s\n", tmp_path);
 		//   6. Delete source segment s.
 		// Steps 5 and 6 MUST be in this order: the journal is updated BEFORE the source
 		// segment is deleted. If power fails between step 5 and step 6, the next boot's
-		// recover_if_needed() sees next_seg=s+1 and renames compact.tmp to segment 0, then
-		// finalize_compaction() deletes the still-present segment s — no data is lost.
+		// recover_if_needed() sees next_seg=s+1, deletes the still-present segment s and
+		// renames compact.tmp to segment 0 (recover_partial_compaction()) — no data is lost.
 		//
 		// _index must not be inserted into or erased from between here and Phase 4
 		// (prune_index_to_max_recs_ runs before, finalize_compaction runs after) so
@@ -1590,11 +1653,31 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 				_filesystem.remove(tmp_path);
 				clear_journal();
 			} else {
-				// Some source segments were already deleted; compact.tmp holds their records.
-				// Leave compact.tmp and the journal in place. recover_if_needed() on the
-				// next boot will rename compact.tmp to segment 0 and recover cleanly.
-				USTORE_LOG("[ustore] WARNING: Compact aborted mid-way after %u segments: recovery on next boot\n",
+				// Source segments 0..committed_segs-1 were already deleted and compact.tmp
+				// holds their records. Recover now, exactly as boot would, so those records
+				// stay readable and no later compaction truncates compact.tmp. The active
+				// segment is never among the deleted ones: a write can only fail while
+				// copying a segment that holds records, and none above it does.
+				USTORE_LOG("[ustore] WARNING: Compact aborted mid-way after %u segments: recovering\n",
 				       committed_segs);
+				if (recover_partial_compaction(committed_segs)) {
+					rebuild_index_from_segments();   // also rewrites the persistent index
+					// As in init(): records evicted by max_recs that still sit in the
+					// surviving segments come back from the rebuild, so prune again.
+					if (prune_index_to_max_recs() > 0) {
+						char iname[USTORE_MAX_FILENAME_LEN]; index_name(iname);
+						_filesystem.remove(iname);
+						write_index_bulk();
+					}
+					open_index_for_append();
+					clear_journal();
+				} else {
+					// Keep compact.tmp and the journal; compact() refuses to run until
+					// recover_if_needed() completes this on the next boot. Until then,
+					// reads of keys that lived in the deleted segments fail. New writes
+					// go to the active segment, which recovery keeps, so none are lost.
+					USTORE_LOG("[ustore] ERROR: Mid-way recovery failed: deferred to next boot\n");
+				}
 			}
 			return false;
 		}
@@ -1602,7 +1685,10 @@ USTORE_LOG("[ustore] Closing tmp file: %s\n", tmp_path);
 		// --- Phase 4: commit journal → safe to finalize ---
 		write_journal(JOURNAL_COMMIT);
 
-		finalize_compaction();   // rename + index rebuild
+		if (!finalize_compaction())   // rename + index rebuild
+			return false;             // keep COMMIT journal; next boot retries.
+			                          // Writes made before that reboot are lost:
+			                          // see the limitation on finalize_compaction().
 
 		clear_journal();
 

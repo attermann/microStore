@@ -82,7 +82,7 @@ When all segments fill, microStore compacts. The algorithm is the bounded-overhe
 3. Write `JOURNAL_COMMIT`.
 4. Rename `compact.tmp` → `segment_0.dat`, rebuild the in-memory index from the new segment, and rewrite the persistent index in bulk.
 
-Peak overhead during compaction is roughly **one extra segment** — not "double the live data". A crash at *any* point either rolls forward (rename `compact.tmp` to `segment_0` and rebuild) or rolls back (discard `compact.tmp`); no data is lost.
+Peak overhead during compaction is roughly **one extra segment** — not "double the live data". A power loss at *any* point either rolls forward (rename `compact.tmp` to `segment_0` and rebuild) or rolls back (discard `compact.tmp`) on the next boot, without losing data. A filesystem error that makes the final rename fail has one known limitation, described in [Crash Safety](#9-crash-safety).
 
 ### 2.5 Persistent index (fast boot)
 
@@ -425,7 +425,7 @@ Compaction triggers automatically when (a) all segments fill or (b) the dead-rec
 store.compact();
 ```
 
-`compact()` returns `false` if it could not complete (e.g. the filesystem is too full to hold even the bounded `compact.tmp`). After a failure the store enters a cooldown of `USTORE_COMPACT_RETRY_MS` before re-trying automatically.
+`compact()` returns `false` if it could not complete (e.g. the filesystem is too full to hold even the bounded `compact.tmp`). After a failure the store enters a cooldown of `USTORE_COMPACT_RETRY_MS` before re-trying automatically. The store stays writable after a failed `compact()`, and `compact()` also returns `false` without doing anything while an earlier compaction is still awaiting recovery (see [Crash Safety](#9-crash-safety)).
 
 ### 6.8 Working with TypedStore
 
@@ -677,8 +677,11 @@ If `S` is too close to that floor, segment rotation fires on nearly every write 
 |--------------|--------|
 | Power loss mid-record | Torn record discarded by CRC + commit-marker scan |
 | Power loss mid-compaction, before any source deleted | `compact.tmp` discarded on next boot |
-| Power loss mid-compaction, some sources already deleted | `compact.tmp` renamed to `segment_0.dat`; index rebuilt from segments; next compaction consolidates |
-| Power loss after `JOURNAL_COMMIT` | `finalize_compaction()` reruns and completes the swap |
+| Power loss mid-compaction, some sources already deleted | `compact.tmp` renamed to `segment_0.dat`; stale index discarded and rebuilt from segments; next compaction consolidates |
+| Power loss after `JOURNAL_COMMIT` | `finalize_compaction()` completes the swap, or only rebuilds the index if the swap had already happened |
+| Write failure mid-compaction (e.g. storage full), some sources already deleted | Recovered immediately in session, the same way as the power-loss case; `compact()` returns `false` |
+| `compact()` called while an earlier compaction awaits recovery | Refused (returns `false`) so `compact.tmp` is not overwritten; boot recovery completes it |
+| Rename of `compact.tmp` fails (filesystem error) | Existing data is preserved and the swap completes on the next boot, but **records written before that reboot are lost** if the failure happened in the final swap (known limitation) |
 | Lost / corrupt index file | `rebuild_index_from_segments()` runs and rewrites it |
 
 Full details and the recovery state machine are in `docs/incremental_compaction.md`.
