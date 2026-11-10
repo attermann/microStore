@@ -964,29 +964,27 @@ private:
 
 	/* -------- POLICY HELPERS -------- */
 
-	// Clean out any records with timestamp in the future.
+	// Pull records whose timestamp lies in the future back to the current
+	// time. On a device without a real-time clock microStore::time() is
+	// millis() plus an offset, so after a reboot it resumes from whatever
+	// offset the application last persisted (or from zero if it persists
+	// none). Every record written after that point is "in the future", and
+	// those are the newest records in the store. Clamping keeps them and
+	// still bounds TTL expiry: such a record ages from this boot. Only the
+	// in-memory index changes; nothing is written.
 	size_t sweep()
 	{
-		size_t evicted = 0;
+		size_t clamped = 0;
 		uint32_t current_time = microStore::time();
-		using KTSAlloc = rebind_alloc<KeyType>;
-		KTSAlloc kts_alloc(_alloc);
-		std::vector<KeyType, KTSAlloc> evict(kts_alloc);
-		evict.reserve(_index.size());
 		for (auto& kv : _index) {
 			if (kv.second.timestamp > current_time) {
-				USTORE_LOG("[ustore] sweep: removing record with timestamp %u seconds in the future\n", kv.second.timestamp - current_time);
-				evict.push_back(kv.first);
+				USTORE_LOG("[ustore] sweep: clamping record with timestamp %u seconds in the future\n", kv.second.timestamp - current_time);
+				kv.second.timestamp = current_time;
+				++clamped;
 			}
 		}
-		for (auto& key : evict) {
-			_index.erase(key);
-			++evicted;
-		}
-		// Record(s) evicted so increment _dead_since_compact
-		_dead_since_compact += evicted;
-		if (evicted > 0) USTORE_LOG("[ustore] sweep: evicted %lu records\n", evicted);
-		return evicted;
+		if (clamped > 0) USTORE_LOG("[ustore] sweep: clamped %lu records\n", clamped);
+		return clamped;
 	}
 
 	bool is_ttl_expired(uint32_t ts, uint32_t record_ttl) const

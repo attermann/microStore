@@ -396,6 +396,8 @@ store.put("session.token", token, /*ttl=*/3600);  // 1 hour
 store.set_ttl_secs(86400);   // 24 hours
 ```
 
+Records whose timestamp lies ahead of the current clock (for example after a reboot on a device without a real-time clock, whose clock resumes from an earlier persisted offset) are kept at `init()`: their timestamp is clamped to the current time in the in-memory index, so their TTL counts from that boot. Nothing is written to flash.
+
 Expired records are evicted lazily — they are detected on `get`/`exists` (which then remove them from the index) and pruned at compaction. They do not consume RAM forever, but they do hold flash until the next compaction sweep.
 
 ### 6.5 Size-based eviction
