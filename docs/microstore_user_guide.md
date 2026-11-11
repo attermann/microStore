@@ -241,7 +241,7 @@ if (!store.init(fs, "/cfg")) {
 Optional `init()` arguments:
 
 - `clearOnInit` — wipe everything before opening (useful for tests).
-- `segment_size`, `segment_count` — override the defaults at runtime (still bounded by the compile-time `USTORE_MAX_*` macros).
+- `segment_size`, `segment_count` — override the defaults at runtime (still bounded by the compile-time `USTORE_MAX_*` macros). `segment_count` has a minimum of 2: compaction writes into seg0 and new records then go to seg1, so a smaller value is raised to 2.
 
 Always call `store.close()` before destruction if you want a clean flush; the destructor does flush, but `close()` also closes the index and active segment explicitly.
 
