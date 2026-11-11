@@ -19,6 +19,7 @@
 #include "../File.h"
 #include "../FileSystem.h"
 #include "../Log.h"
+#include "../Path.h"
 
 #include <SPIFFS.h>
 
@@ -129,7 +130,8 @@ protected:
 		}
 
 
-		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+		virtual microStore::File open(const char* path_in, microStore::File::Mode mode, const bool create = false) override {
+			USTORE_RESOLVE_PATH(path, path_in, {});
 			const char* pmode;
 			switch (mode) {
 				// Read only. File must exist. ("r")
@@ -165,26 +167,32 @@ protected:
 		}
 
 
-		virtual bool exists(const char* path) override {
+		virtual bool exists(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return SPIFFS.exists(path);
 		}
 
-		virtual bool remove(const char* path) override {
+		virtual bool remove(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return SPIFFS.remove(path);
 		}
 
-		virtual bool rename(const char* from_path, const char* to_path) override {
+		virtual bool rename(const char* from_in, const char* to_in) override {
+			USTORE_RESOLVE_PATH(from_path, from_in, false);
+			USTORE_RESOLVE_PATH(to_path, to_in, false);
 			return SPIFFS.rename(from_path, to_path);
 		}
 
-		virtual bool mkdir(const char* path) override {
+		virtual bool mkdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			if (!SPIFFS.mkdir(path)) {
 				return false;
 			}
 			return true;
 		}
 
-		virtual bool rmdir(const char* path) override {
+		virtual bool rmdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			if (!SPIFFS.rmdir(path)) {
 				return false;
 			}
@@ -192,7 +200,8 @@ protected:
 		}
 
 
-		virtual bool isDirectory(const char* path) override {
+		virtual bool isDirectory(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			fs::File file = SPIFFS.open(path, FILE_READ);
 			if (file) {
 				bool is_directory = file.isDirectory();
@@ -202,8 +211,9 @@ protected:
 			return false;
 		}
 
-		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
+		virtual std::list<std::string> listDirectory(const char* path_in, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
+			USTORE_RESOLVE_PATH(path, path_in, files);
 			fs::File root = SPIFFS.open(path);
 			if (!root) {
 				return files;
@@ -229,6 +239,15 @@ protected:
 			return (SPIFFS.totalBytes() - SPIFFS.usedBytes());
 		}
 
+
+	private:
+		// Paths are root-relative ("/a/b", "./a/b" and "a/b" are the same file);
+		// the framework adds the mount point.
+		inline const char* resolve(const char* path, char* buf, size_t n) const {
+			const char* resolved = Path::normalize(path, buf, n);
+			if (resolved == nullptr) USTORE_LOG("[ustore] SPIFFSFileSystem: path too long: %s\n", path);
+			return resolved;
+		}
 	};
 
 };

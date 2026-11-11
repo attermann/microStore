@@ -19,6 +19,7 @@
 #include "../File.h"
 #include "../FileSystem.h"
 #include "../Log.h"
+#include "../Path.h"
 
 #include <LittleFS.h>
 
@@ -85,7 +86,9 @@ protected:
 	class FileSystemImpl : public microStore::FileSystemImpl {
 
 	public:
-		FileSystemImpl(const char* basepath = "") : _basepath(basepath) {}
+		FileSystemImpl(const char* basepath = "") {
+			_basepath_ok = Path::copy_base(_basepath, sizeof(_basepath), basepath);
+		}
 	    virtual ~FileSystemImpl() {}
 
 	public:
@@ -101,8 +104,18 @@ protected:
 
 		inline virtual bool init(bool reformatOnFail = true) override {
 			USTORE_LOG("[ustore] Initializing LittleFSFileSystem\n");
-			// Initialize LittleFS
-			if (!LittleFS.begin(true, _basepath)) {
+			if (!_basepath_ok) {
+				USTORE_LOG("[ustore] LittleFSFileSystem base path longer than %d characters!\n", USTORE_MAX_BASEPATH_LEN - 1);
+				return false;
+			}
+			// Initialize LittleFS. The base path is the mount point; Arduino
+			// keeps the pointer, so pass storage that outlives this adapter.
+			bool conflict = false;
+			const char* mount = Path::persistent_mount(_basepath, &conflict);
+			if (conflict) {
+				USTORE_LOG("[ustore] WARNING: LittleFS already mounted at \"%s\", ignoring base path \"%s\"\n", mount, _basepath);
+			}
+			if (!LittleFS.begin(true, mount)) {
 				USTORE_LOG("[ustore] Failed to initialize LittleFSFileSystem!\n");
 				return false;
 			}
@@ -129,7 +142,8 @@ protected:
 		}
 
 
-		virtual microStore::File open(const char* path, microStore::File::Mode mode, const bool create = false) override {
+		virtual microStore::File open(const char* path_in, microStore::File::Mode mode, const bool create = false) override {
+			USTORE_RESOLVE_PATH(path, path_in, {});
 			const char* pmode;
 			switch (mode) {
 				// Read only. File must exist. ("r")
@@ -165,30 +179,37 @@ protected:
 		}
 
 
-		inline virtual bool exists(const char* path) override {
+		inline virtual bool exists(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return LittleFS.exists(path);
 		}
 
-		inline virtual bool remove(const char* path) override {
+		inline virtual bool remove(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			return LittleFS.remove(path);
 		}
 
-		inline virtual bool rename(const char* from_path, const char* to_path) override {
+		inline virtual bool rename(const char* from_in, const char* to_in) override {
+			USTORE_RESOLVE_PATH(from_path, from_in, false);
+			USTORE_RESOLVE_PATH(to_path, to_in, false);
 			return LittleFS.rename(from_path, to_path);
 		}
 
-		inline virtual bool mkdir(const char* path) override {
+		inline virtual bool mkdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			if (!LittleFS.mkdir(path)) return false;
 			return true;
 		}
 
-		inline virtual bool rmdir(const char* path) override {
+		inline virtual bool rmdir(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			if (!LittleFS.rmdir(path)) return false;
 			return true;
 		}
 
 
-		virtual bool isDirectory(const char* path) override {
+		virtual bool isDirectory(const char* path_in) override {
+			USTORE_RESOLVE_PATH(path, path_in, false);
 			fs::File file = LittleFS.open(path, FILE_READ);
 			if (file) {
 				bool is_directory = file.isDirectory();
@@ -198,8 +219,9 @@ protected:
 			return false;
 		}
 
-		virtual std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing callback = nullptr) override {
+		virtual std::list<std::string> listDirectory(const char* path_in, Callbacks::DirectoryListing callback = nullptr) override {
 			std::list<std::string> files;
+			USTORE_RESOLVE_PATH(path, path_in, files);
 			fs::File root = LittleFS.open(path);
 			if (!root) {
 				return files;
@@ -226,7 +248,16 @@ protected:
 		}
 
 	private:
-		const char* _basepath = "";
+		char _basepath[USTORE_MAX_BASEPATH_LEN];
+		bool _basepath_ok = false;
+
+		// Paths are root-relative ("/a/b", "./a/b" and "a/b" are the same file);
+		// the framework adds the mount point.
+		inline const char* resolve(const char* path, char* buf, size_t n) const {
+			const char* resolved = Path::normalize(path, buf, n);
+			if (resolved == nullptr) USTORE_LOG("[ustore] LittleFSFileSystem: path too long: %s\n", path);
+			return resolved;
+		}
 	};
 
 };

@@ -188,6 +188,35 @@ Use it when the choice between persistent and volatile storage depends on runtim
 
 Adding a new backend means subclassing `FileSystemImpl` and `FileImpl`. The `File` class accumulates a running CRC-32 on every read/write transparently — call `file.crc()` to retrieve it.
 
+### 4.1 Paths and base paths
+
+Every adapter, on every platform, treats paths the same way:
+
+- **A path is always relative to the adapter's root.** `"/cfg"`, `"./cfg"` and `"cfg"` all name the same thing, `<root>/cfg`. Pick whichever spelling you like; the same string works unchanged on native hosts and on MCUs.
+- **The base path says where the root is.** Leave it empty (the default) for the backend's natural root:
+
+| Adapter | Root with the default (empty) base path | Root with base path `B` |
+|---------|------------------------------------------|-------------------------|
+| `PosixFileSystem`, `StdioFileSystem` (native) | the current working directory | host directory `B` (relative `B` is under the current directory) |
+| `PosixFileSystem`, `StdioFileSystem` (ESP32) | LittleFS, mounted as ESP-IDF's fallback filesystem | LittleFS mounted at `B` (must start with `/`, e.g. `"/littlefs"`) |
+| `LittleFSFileSystem` (ESP32) | LittleFS, mounted as ESP-IDF's fallback filesystem | LittleFS mounted at `B` |
+| `SPIFFSFileSystem`, `SDFileSystem`, `InternalFSFileSystem`, `FlashFSFileSystem` | the filesystem's root | — (no base-path parameter) |
+
+`".."` is passed through as-is: the base path is a root, not a security sandbox.
+
+**Reaching the host's real root on native.** Give it as the base path:
+
+```cpp
+using namespace microStore;
+FileSystem app { Adapters::PosixFileSystem() };                 // "./kv/" and "/kv/" → <cwd>/kv/
+FileSystem host{ Adapters::PosixFileSystem("/") };              // "/tmp/x" → /tmp/x
+FileSystem data{ Adapters::PosixFileSystem("/var/lib/myapp") }; // "/kv/" → /var/lib/myapp/kv/
+```
+
+`FileSystem` objects are cheap handles, so use two of them when one part of a program stores data under its own root and another part needs absolute host paths.
+
+**Limits and memory.** Path resolution never allocates. Each filesystem call resolves its path into a stack buffer of `USTORE_MAX_PATH_LEN` bytes (two for `rename()`), and the base path is copied into a fixed `USTORE_MAX_BASEPATH_LEN` buffer inside the adapter, so the caller's string needn't outlive the call. A resolved path that doesn't fit makes that call fail; it is never truncated. A base path that doesn't fit makes `init()` and every call fail. On ESP32, the LittleFS mount point lives in one static buffer for the life of the program, because the Arduino FS layer keeps the pointer it is given. LittleFS is a single shared filesystem, so the first adapter to `init()` fixes its mount point; a later adapter that asks for a different one logs a warning and uses the existing mount.
+
 ---
 
 ## 5. Quick Start
@@ -626,6 +655,8 @@ All have sane defaults; override only if you have a reason.
 | `USTORE_MAX_KEY_LEN` | `64` | Maximum key length in bytes |
 | `USTORE_MAX_VALUE_LEN` | `1024` | Maximum value length in bytes |
 | `USTORE_MAX_FILENAME_LEN` | `64` | Maximum total length of generated filenames |
+| `USTORE_MAX_PATH_LEN` | `128` | Maximum length of a resolved adapter path, base path included; one stack buffer of this size per filesystem call (see §4.1) |
+| `USTORE_MAX_BASEPATH_LEN` | `32` | Maximum length of an adapter base path / mount point |
 | `USTORE_COMPACT_RETRY_MS` | `60000` | Cooldown between failed compaction attempts |
 | `USTORE_COMPACT_THRESHOLD` | `25` | % of dead records that triggers auto-compaction (0 to disable) |
 | `USTORE_DEFAULT_TTL_SECS` | `0` | Initial global TTL (0 = disabled) |

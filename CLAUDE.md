@@ -64,6 +64,20 @@ microStore is a persistent key-value store for embedded systems, inspired by Bit
 
 `File` accumulates a running CRC-32 on every read/write transparently; call `file.crc()` to retrieve it. To add a new platform, subclass `FileSystemImpl` and `FileImpl`.
 
+### Paths
+
+One path model for every adapter and platform, implemented in `include/microStore/Path.h`:
+
+- **Paths are root-relative.** `/a`, `./a` and `a` name the same file under the adapter's root.
+- **The base path is the root.** An empty base means the backend's default root: the cwd on native, the fallback mount on ESP32, and the filesystem root elsewhere. Native host-absolute paths need base `"/"`.
+- **Adapters resolve every path argument** with `USTORE_RESOLVE_PATH(var, in, fail)`, which uses a stack buffer of `USTORE_MAX_PATH_LEN` and calls the adapter's private `resolve()`:
+  - ESP32 VFS and nRF52 adapters use `Path::normalize` (no copy when the path is already canonical); the framework adds the mount point.
+  - Posix/Stdio use `Path::join(base, p)`, with base `"."` when empty on native.
+- **Keep the path code allocation-free:** no `std::string`.
+  - Base paths are copied into `char[USTORE_MAX_BASEPATH_LEN]` members with `Path::copy_base`.
+  - Mount points passed to `LittleFS.begin()` must come from `Path::persistent_mount()`, because Arduino's `FSImpl` keeps the raw pointer.
+- **Don't resolve in the `FileSystem` wrapper:** the VFS adapters would get the mount point added twice.
+
 ### Platform Detection
 
 - `PLATFORM_NATIVE`: uses `std::chrono` for timestamps
